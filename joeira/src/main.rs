@@ -14,8 +14,8 @@
 
 use clap::{Parser, Subcommand};
 use joeira_core::{
-    avalia, prova, AmbienteMock, ClasseFalsoPositivo, Ponto, Predicado, Regra, Reversibilidade,
-    Severidade, Veredito,
+    AmbienteMock, ClasseFalsoPositivo, Ponto, Predicado, Regra, Reversibilidade, Severidade,
+    Veredito, avalia, prova,
 };
 
 #[derive(Parser)]
@@ -99,7 +99,10 @@ fn cmd_prova() -> anyhow::Result<()> {
         );
     }
     // Count AND denominator, always — a bare "ok" hides how much was examined.
-    println!("prova: {}/{n} rules green in both directions", n - vermelhas);
+    println!(
+        "prova: {}/{n} rules green in both directions",
+        n - vermelhas
+    );
     anyhow::ensure!(vermelhas == 0, "{vermelhas} of {n} rules are red");
     Ok(())
 }

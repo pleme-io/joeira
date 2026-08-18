@@ -32,7 +32,9 @@ pub enum ErroDeLeitura {
     #[error("rule `{regra}` is missing required keyword `{chave}`")]
     ChaveAusente { regra: String, chave: String },
 
-    #[error("rule `{regra}`: `:ponto {achado}` is not a known mount point (recognised: {conhecidas})")]
+    #[error(
+        "rule `{regra}`: `:ponto {achado}` is not a known mount point (recognised: {conhecidas})"
+    )]
     PontoDesconhecido {
         regra: String,
         achado: String,
@@ -45,13 +47,7 @@ pub enum ErroDeLeitura {
 
 /// The keywords `(defjoeira …)` accepts. Closed, and echoed into every
 /// `ChaveDesconhecida` so the error teaches the surface.
-pub const CHAVES: &[&str] = &[
-    ":nome",
-    ":ponto",
-    ":mensagem",
-    ":reversibilidade",
-    ":fp",
-];
+pub const CHAVES: &[&str] = &[":nome", ":ponto", ":mensagem", ":reversibilidade", ":fp"];
 
 /// A read form, before it becomes a `joeira_core::Regra`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,7 +91,7 @@ pub fn ler(fonte: &str) -> Result<FormaLida, ErroDeLeitura> {
         outro => {
             return Err(ErroDeLeitura::NaoEhDefjoeira {
                 achado: outro.unwrap_or("<empty>").to_owned(),
-            })
+            });
         }
     }
     match it.next().map(String::as_str) {
@@ -103,7 +99,7 @@ pub fn ler(fonte: &str) -> Result<FormaLida, ErroDeLeitura> {
         outro => {
             return Err(ErroDeLeitura::NaoEhDefjoeira {
                 achado: outro.unwrap_or("<empty>").to_owned(),
-            })
+            });
         }
     }
 
@@ -132,7 +128,7 @@ pub fn ler(fonte: &str) -> Result<FormaLida, ErroDeLeitura> {
                     regra: rotulo,
                     chave: outra.to_owned(),
                     conhecidas: CHAVES.join(" "),
-                })
+                });
             }
         }
     }
@@ -226,10 +222,8 @@ mod tests {
     /// reports as success.
     #[test]
     fn a_typod_keyword_is_refused_not_defaulted() {
-        let e = ler(
-            r#"(defjoeira :nome "r" :ponto commit-msg :mensagem "m" :pontoo commit-msg)"#,
-        )
-        .expect_err("must refuse");
+        let e = ler(r#"(defjoeira :nome "r" :ponto commit-msg :mensagem "m" :pontoo commit-msg)"#)
+            .expect_err("must refuse");
         assert!(matches!(e, ErroDeLeitura::ChaveDesconhecida { .. }));
         // The error teaches the surface rather than just naming the typo.
         assert!(e.to_string().contains(":ponto"));
@@ -270,7 +264,8 @@ mod tests {
     #[test]
     fn unbalanced_parens_are_refused() {
         assert!(matches!(
-            ler(r#"(defjoeira :nome "r" :ponto commit-msg :mensagem "m""#).expect_err("must refuse"),
+            ler(r#"(defjoeira :nome "r" :ponto commit-msg :mensagem "m""#)
+                .expect_err("must refuse"),
             ErroDeLeitura::ParentesesDesbalanceados
         ));
     }

@@ -47,10 +47,7 @@ fn tecto_is_total_over_both_axes() {
 /// a PROSE matcher may not block.
 #[test]
 fn irreversible_prose_does_not_reach_block() {
-    let t = Severidade::tecto(
-        Reversibilidade::Irreversivel,
-        ClasseFalsoPositivo::Prosa,
-    );
+    let t = Severidade::tecto(Reversibilidade::Irreversivel, ClasseFalsoPositivo::Prosa);
     assert_eq!(t, Severidade::AvisaComCatraca);
     assert!(!t.gateia());
 }
@@ -179,7 +176,10 @@ fn placeholder_subject_leaves_recovery_paths_alone() {
         "update the parser to handle nested forms",
     ] {
         assert!(
-            matches!(avalia(&r, &AmbienteMock::com_mensagem(aceito)), Veredito::Limpo),
+            matches!(
+                avalia(&r, &AmbienteMock::com_mensagem(aceito)),
+                Veredito::Limpo
+            ),
             "must pass: {aceito}"
         );
     }
@@ -211,7 +211,10 @@ fn trailer_rule_catches_both_forms_not_just_the_famous_one() {
         "feat: x\n\n  Claude-Session: indented",
     ] {
         assert!(
-            matches!(avalia(&r, &AmbienteMock::com_mensagem(m)), Veredito::Achado { .. }),
+            matches!(
+                avalia(&r, &AmbienteMock::com_mensagem(m)),
+                Veredito::Achado { .. }
+            ),
             "must catch: {m}"
         );
     }
@@ -253,7 +256,10 @@ fn conflict_markers_need_the_pair() {
     // A lone `=======` is an ordinary markdown rule — must pass, or documentation
     // becomes uncommittable.
     assert!(matches!(
-        avalia(&r, &AmbienteMock::default().com_stage("f", "# T\n\n=======\n")),
+        avalia(
+            &r,
+            &AmbienteMock::default().com_stage("f", "# T\n\n=======\n")
+        ),
         Veredito::Limpo
     ));
     // A lone opener appears in prose about merges.
@@ -294,7 +300,10 @@ fn regra_amarra_d2() -> Regra {
 #[test]
 fn d2_tie_fires_only_on_a_real_mismatch() {
     let r = regra_amarra_d2();
-    assert!(matches!(avalia(&r, &r.prova_bloqueia), Veredito::Achado { .. }));
+    assert!(matches!(
+        avalia(&r, &r.prova_bloqueia),
+        Veredito::Achado { .. }
+    ));
     assert!(matches!(avalia(&r, &r.prova_passa), Veredito::Limpo));
 }
 
@@ -330,16 +339,19 @@ fn regra_credencial_prosa() -> Regra {
         "sec-plaintext-password",
         Ponto::PreCommit,
         Predicado::LinhaAdicionadaCasa {
-            padroes: vec![Padrao::novo(
-                "sec-plaintext-password",
-                r"(?i)pass(word|phrase)\s*[:=]\s*[^:/\s<{$][^\s<{$]{7,}",
-            )
-            .expect("pattern compiles")],
+            padroes: vec![
+                Padrao::novo(
+                    "sec-plaintext-password",
+                    r"(?i)pass(word|phrase)\s*[:=]\s*[^:/\s<{$][^\s<{$]{7,}",
+                )
+                .expect("pattern compiles"),
+            ],
         },
         Reversibilidade::Irreversivel,
         ClasseFalsoPositivo::Prosa,
         "plaintext password assignment",
-        AmbienteMock::default().com_stage("app.conf", "listen = 0\npassword: correcthorsebattery\n"),
+        AmbienteMock::default()
+            .com_stage("app.conf", "listen = 0\npassword: correcthorsebattery\n"),
         AmbienteMock::default().com_stage("app.conf", "listen = 0\npassword: <redacted>\n"),
     )
 }
@@ -350,8 +362,14 @@ fn regra_credencial_prosa() -> Regra {
 fn a_line_already_in_head_is_not_an_addition() {
     let r = regra_credencial_prosa();
     let reordenado = AmbienteMock::default()
-        .com_head("v.yaml", "alpha: 1\npassword: correcthorsebattery\nbeta: 2\n")
-        .com_stage("v.yaml", "beta: 2\nalpha: 1\npassword: correcthorsebattery\n");
+        .com_head(
+            "v.yaml",
+            "alpha: 1\npassword: correcthorsebattery\nbeta: 2\n",
+        )
+        .com_stage(
+            "v.yaml",
+            "beta: 2\nalpha: 1\npassword: correcthorsebattery\n",
+        );
     assert!(
         matches!(avalia(&r, &reordenado), Veredito::Limpo),
         "a reorder re-adds an already-committed line; re-accusing it is the FP engine"
@@ -451,8 +469,16 @@ fn every_rule_proves_in_both_directions() {
     let (n, rows) = prova(&corpus());
     assert_eq!(n, 5, "denominator, printed with the verdict");
     for row in &rows {
-        assert!(row.bloqueia_ok, "{} did not refuse its own witness", row.regra);
-        assert!(row.passa_ok, "{} refused its own passing witness", row.regra);
+        assert!(
+            row.bloqueia_ok,
+            "{} did not refuse its own witness",
+            row.regra
+        );
+        assert!(
+            row.passa_ok,
+            "{} refused its own passing witness",
+            row.regra
+        );
         assert!(row.verde());
     }
 }
@@ -542,11 +568,17 @@ fn todos_algum_nao_compose() {
     };
 
     assert!(matches!(
-        avalia(&r(Predicado::Algum(vec![na_lista("nope"), na_lista("init")])), &amb),
+        avalia(
+            &r(Predicado::Algum(vec![na_lista("nope"), na_lista("init")])),
+            &amb
+        ),
         Veredito::Achado { .. }
     ));
     assert!(matches!(
-        avalia(&r(Predicado::Todos(vec![na_lista("nope"), na_lista("init")])), &amb),
+        avalia(
+            &r(Predicado::Todos(vec![na_lista("nope"), na_lista("init")])),
+            &amb
+        ),
         Veredito::Limpo
     ));
     assert!(matches!(
