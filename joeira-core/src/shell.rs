@@ -64,6 +64,16 @@ pub struct AmbienteShell {
     head: RefCell<BTreeMap<String, Option<String>>>,
     /// The staged path list, resolved at most once.
     caminhos: RefCell<Option<Vec<String>>>,
+    /// An explicit commit message, overriding the HEAD read below.
+    ///
+    /// `commit-msg` is handed a FILE path in argv, so the message being judged
+    /// is not a repository fact at all. Without this the environment answers
+    /// with HEAD's message, which is correct when HEAD *is* the commit under
+    /// test and silently wrong whenever it is not — the oracle stages HEAD at
+    /// the PARENT, so every subject rule would have judged the previous
+    /// commit's subject and reported a systematic disagreement that looks like
+    /// an engine difference.
+    mensagem_forcada: Option<String>,
 }
 
 impl AmbienteShell {
@@ -80,7 +90,20 @@ impl AmbienteShell {
             stage: RefCell::new(BTreeMap::new()),
             head: RefCell::new(BTreeMap::new()),
             caminhos: RefCell::new(None),
+            mensagem_forcada: None,
         }
+    }
+
+    /// Judge `msg` instead of HEAD's message.
+    ///
+    /// Consumed by the P1 hook entrypoint (which is handed the path) and by the
+    /// oracle (which knows the commit under test). Takes precedence
+    /// unconditionally: a caller that supplies a message has strictly better
+    /// information than a HEAD read.
+    #[must_use]
+    pub fn com_mensagem(mut self, msg: &str) -> Self {
+        self.mensagem_forcada = Some(msg.to_owned());
+        self
     }
 
     #[must_use]
@@ -154,6 +177,9 @@ impl AmbienteGit for AmbienteShell {
         // overrides it with the file it was given. Returning an error here
         // instead would make every message rule report `Cego` in the oracle,
         // where HEAD's message is exactly the right answer.
+        if let Some(m) = &self.mensagem_forcada {
+            return Ok(m.clone());
+        }
         self.git(&["log", "-1", "--format=%B", "HEAD"])
     }
 

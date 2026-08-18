@@ -12,6 +12,8 @@
 //! missing `core.hooksPath` directory is not an error, which is the default
 //! state of every container, sandbox, CI runner and daemon.
 
+mod oraculo;
+
 use clap::{Parser, Subcommand};
 use joeira_core::{AmbienteMock, Ponto, Predicado, Regra, Severidade, Veredito, avalia, prova};
 
@@ -41,12 +43,31 @@ enum Comando {
     },
     /// Print the mount points and what each may read.
     Pontos,
+    /// Differential against the DEPLOYED incumbent hooks over real history.
+    ///
+    /// Exits non-zero on an un-triaged disagreement, on an empty denominator,
+    /// or if the deployed hooks are absent — never reports agreement against a
+    /// hook that does not run.
+    Oraculo {
+        /// Repository to walk. Read-only; the index written is a scratch
+        /// clone's own.
+        #[arg(long, default_value = ".")]
+        repo: std::path::PathBuf,
+        /// How many non-merge commits.
+        #[arg(long, default_value_t = 500)]
+        n: usize,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
     match Cli::parse().comando {
         Comando::Eval => cmd_eval(),
         Comando::Prova { all } => cmd_prova(all),
+        Comando::Oraculo { repo, n } => {
+            let regras = corpus()?;
+            let linhas = oraculo::corre(&repo, n, &regras)?;
+            oraculo::relata(&linhas)
+        }
         Comando::Pontos => {
             for p in Ponto::todos() {
                 println!("  {:<12} reads {:?}", p.arquivo(), p.leitura());
