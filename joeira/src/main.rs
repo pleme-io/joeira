@@ -311,7 +311,27 @@ fn testemunhas(f: &joeira_lisp::FormaLida) -> Option<Testemunhas> {
                         // a long value — found by the gate refusing a commit
                         // that contained no credential. `\S{7,}` is what lets
                         // `password: <redacted>` through.
-                        r"(?i)(^|[^A-Za-z0-9])(password|passwd|secret|client_secret)\s*[:=]\s*[^:\s]\S{7,}",
+                        // TWO arms with DIFFERENT length floors, and the
+                        // asymmetry is measured rather than stylistic. The
+                        // incumbent uses 7 for `pass(word|wd|phrase)` and 15
+                        // for `secret`, because `secret` is an ordinary word in
+                        // English and in code while `password` is nearly always
+                        // a credential key.
+                        //
+                        // Collapsing both to 7 was a joeira FALSE POSITIVE, and
+                        // the oracle caught it on a real commit: the Nix line
+                        // `lookupOf = name: secret: secret.key or name;` is
+                        // function-argument syntax, and at 7 it reads as
+                        // `secret:` followed by `ecret.key`. At 15 there are
+                        // only 10 non-space characters available and it does
+                        // not fire. Adopting the incumbent's floor rather than
+                        // inventing one.
+                        r"(?i)pass(word|wd|phrase)\s*[:=]\s*[^:/\s<{$][^\s<{$]{7,}",
+                    )
+                    .ok()?,
+                    joeira_core::Padrao::novo(
+                        "plaintext-secret-assignment",
+                        r"(?i)(^|[^A-Za-z0-9])((client|api|app|consumer)[_-])?secret([_-](key|token|access[_-]key))?\s*[:=]\s*[^:/\s<{$][^\s<{$]{15,}",
                     )
                     .ok()?,
                 ],

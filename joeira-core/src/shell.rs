@@ -15,11 +15,21 @@
 //!
 //! | fact | invocation | why exactly this |
 //! |---|---|---|
-//! | staged paths | `git diff --cached --name-only --diff-filter=ACMR` | `R` was **out by omission until 2026-08-13** and that was a live bypass: git reports a `git mv` that also edits a file as `R` whenever similarity stays above the rename threshold, so renaming a file while adding a credential to it was ALLOWED. `D` is out by reasoning — a deletion cannot introduce anything, and asking git to show a deleted path errors. |
+//! | staged paths | `git diff --cached --name-only -z --diff-filter=ACMR` | `R` was **out by omission until 2026-08-13** and that was a live bypass: git reports a `git mv` that also edits a file as `R` whenever similarity stays above the rename threshold, so renaming a file while adding a credential to it was ALLOWED. `D` is out by reasoning — a deletion cannot introduce anything, and asking git to show a deleted path errors. **`-z` closes a second live bypass**: `core.quotePath` is on by default, so any non-ASCII path is reported C-quoted (`"caf\303\251.txt"`), that string is not the path, and a status-blind gate reads the failed `git show` as "adds nothing". Measured on the deployed incumbent: a credential in `café.txt` exits 0. |
 //! | staged blob | `git show :<path>` | the INDEX, never the worktree. A worktree read reports "fresh" for the exact mistake the D2 tie catches — reproduced on `shinka`: stage the sidecar alone, leave its partner dirty, and a worktree-based gate passes a commit that breaks every consumer. |
 //! | HEAD blob | `git show HEAD:<path>` | non-zero exit ⇒ `Ok(None)`, **not** an error. A new file, or a rename's destination, has no HEAD copy; that is a fact about the path, not a failure to look. |
 //! | added lines | `git diff --cached -U0 --text -- <path>` | `--text` is load-bearing. git classifies a file carrying NUL bytes as binary and prints `Binary files differ` instead of hunks, so without it a diff-based scan yields **zero** `+` lines for such a file and every credential inside walks through. Invisible in testing unless a fixture really contains a NUL. |
 //! | staged sha256 | sha256 over the `git show :<path>` bytes | byte-fidelity is already calibrated upstream: the incumbent records that this reproduces `shasum -a 256` of the staged blob exactly, so it compares the same quantity `gen` writes down. |
+//!
+//! # SYNTHETIC-FIXTURE
+//!
+//! Every credential-shaped string in this file is a MEASUREMENT, quoted as the
+//! evidence for a narrowing — `password: hunter2supersecret` is the payload that
+//! proved the `core.quotePath` bypass, not a credential. The fleet's own
+//! `blockSecrets` hook refused this file on that basis, correctly, and the
+//! marker is the sanctioned per-file escape rather than `--no-verify`, which
+//! would also disable the D2 tie and the conflict-marker guard on the same
+//! commit.
 //!
 //! # Process discipline, from `tend::GitOps`
 //!
@@ -187,10 +197,39 @@ impl AmbienteGit for AmbienteShell {
         if let Some(cached) = self.caminhos.borrow().as_ref() {
             return Ok(cached.clone());
         }
-        let out = self.git(&["diff", "--cached", "--name-only", "--diff-filter=ACMR"])?;
+        // `-z` is NOT a tidiness flag, and it closes a live bypass. Without it
+        // git applies `core.quotePath`, which is ON by default, and reports any
+        // path containing a non-ASCII byte in C-quoted form —
+        // `"caf\303\251.txt"` for `café.txt`. That quoted string is not the
+        // path, so `git show :"caf\303\251.txt"` fails, and a gate that does
+        // not check status reads the empty stdout as "this file adds nothing"
+        // and passes the commit.
+        //
+        // MEASURED 2026-08-18 against the deployed incumbent hook: a file named
+        // `café.txt` containing `password: hunter2supersecret` exits 0 —
+        // invisible to the credential gate, the conflict-marker gate and the D2
+        // tie alike. Any CJK, Cyrillic, accented or emoji filename is in that
+        // class, which makes it much broader than the pathological
+        // newline-in-filename case that first surfaced it (found by the oracle
+        // as two `Cego` rows on a commit that had accidentally staged paths with
+        // embedded newlines).
+        //
+        // `-z` emits paths VERBATIM, NUL-separated, so the quoting never
+        // happens. Splitting on NUL rather than newline is then also correct for
+        // a path that genuinely contains a newline.
+        //
+        // joeira reported `Cego` here rather than `Limpo` even before this fix,
+        // which is the whole argument for the four-arm verdict: "I could not
+        // see" and "there is nothing to see" must not render the same.
+        let out = self.git(&[
+            "diff",
+            "--cached",
+            "--name-only",
+            "-z",
+            "--diff-filter=ACMR",
+        ])?;
         let paths: Vec<String> = out
-            .lines()
-            .map(str::trim)
+            .split('\0')
             .filter(|l| !l.is_empty())
             .map(str::to_owned)
             .collect();
