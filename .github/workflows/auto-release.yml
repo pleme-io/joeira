@@ -1,0 +1,11 @@
+name: auto-release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  release:
+    uses: pleme-io/substrate/.github/workflows/rust-auto-release.yml@main
+    secrets: inherit
