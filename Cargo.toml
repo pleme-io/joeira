@@ -3,7 +3,7 @@ resolver = "2"
 members = ["joeira-core", "joeira-lisp", "joeira"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.89.0"
 license = "MIT"
@@ -20,9 +20,9 @@ authors = ["pleme-io"]
 # repo-forge's `:kind :rust-workspace-tool` renderer emits path-ONLY, so this is
 # a hand fix on top of the scaffold; the same shape lands in every generated
 # workspace, including daicho's.
-joeira-core = { path = "joeira-core", version = "0.1.1" }
-joeira-lisp = { path = "joeira-lisp", version = "0.1.1" }
-joeira = { path = "joeira", version = "0.1.1" }
+joeira-core = { path = "joeira-core", version = "0.1.2" }
+joeira-lisp = { path = "joeira-lisp", version = "0.1.2" }
+joeira = { path = "joeira", version = "0.1.2" }
 hayai = { version = "0.1" }
 shikumi = { version = "0.1" }
 tatara-lisp = { version = "0.3" }
