@@ -1,0 +1,22 @@
+[package]
+name = "joeira"
+description = "joeira — the typed git-hook control plane: one closed predicate algebra, one registry, one default library"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "joeira"
+path = "src/main.rs"
+
+[dependencies]
+joeira-core = { workspace = true }
+joeira-lisp = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+
+[lints]
+workspace = true

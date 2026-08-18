@@ -1,0 +1,17 @@
+[package]
+name = "joeira-core"
+description = "joeira's typed border: the closed predicate algebra, the severity projection, and the mockable git environment seam"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+regex = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

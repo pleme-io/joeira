@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = ["joeira-core", "joeira-lisp", "joeira"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89.0"
+license = "MIT"
+repository = "https://github.com/pleme-io/joeira"
+authors = ["pleme-io"]
+
+[workspace.dependencies]
+# `version` ALONGSIDE `path`, and the version is what makes these publishable.
+# At publish time cargo strips the path and substitutes the registry version;
+# with no version there is nothing to substitute, so the manifest cannot be
+# verified and the whole workspace stops shipping. A caret floor is enough — it
+# does not need bumping with the workspace version.
+#
+# repo-forge's `:kind :rust-workspace-tool` renderer emits path-ONLY, so this is
+# a hand fix on top of the scaffold; the same shape lands in every generated
+# workspace, including daicho's.
+joeira-core = { path = "joeira-core", version = "0.1.0" }
+joeira-lisp = { path = "joeira-lisp", version = "0.1.0" }
+joeira = { path = "joeira", version = "0.1.0" }
+hayai = { version = "0.1" }
+shikumi = { version = "0.1" }
+tatara-lisp = { version = "0.3" }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = { version = "0.9" }
+regex = { version = "1" }
+thiserror = { version = "2" }
+clap = { version = "4", features = ["derive"] }
+anyhow = { version = "1" }
+
+[workspace.lints]
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+
+[profile]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+strip = true
