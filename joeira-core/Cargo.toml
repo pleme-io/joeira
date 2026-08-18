@@ -12,6 +12,8 @@ authors.workspace = true
 serde = { workspace = true }
 regex = { workspace = true }
 thiserror = { workspace = true }
+serde_json = { workspace = true }
+okiba = { workspace = true }
 
 [lints]
 workspace = true

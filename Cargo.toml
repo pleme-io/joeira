@@ -29,6 +29,8 @@ shikumi = { version = "0.1" }
 tatara-lisp = { version = "0.3" }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = { version = "0.9" }
+serde_json = { version = "1" }
+okiba = { version = "0.3" }
 regex = { version = "1" }
 thiserror = { version = "2" }
 clap = { version = "4", features = ["derive"] }

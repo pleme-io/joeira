@@ -1,10 +1,33 @@
 //! joeira's typed border — the closed predicate algebra, the derived severity
 //! projection, and the mockable git-environment seam.
 //!
-//! Design: `theory/JOEIRA.md`. This crate is P0's "typed border" and nothing
-//! else: it holds no I/O, spawns no process, and reads no file. Every fact about
-//! a repository arrives through [`AmbienteGit`], which is a trait precisely so
-//! the whole engine is testable mock-green with zero real side effects.
+//! Design: `theory/JOEIRA.md`.
+//!
+//! # What is pure here, and what is not
+//!
+//! An earlier revision of this comment claimed the crate "holds no I/O, spawns
+//! no process, and reads no file". That was true when only the algebra and the
+//! mock existed, and it stopped being true the moment [`shell`] and [`journal`]
+//! landed. Correcting the claim rather than the code, because the split that
+//! matters is not crate-shaped:
+//!
+//! - **The engine is pure.** [`Predicado`], [`Severidade`], [`Regra`],
+//!   [`avalia`] and [`prova`] touch nothing. Every fact about a repository
+//!   arrives through the [`AmbienteGit`] trait, which is why the whole rule
+//!   corpus is testable mock-green with zero real side effects — and why the
+//!   engine tests spawn no process and write no file. (The journal tests do
+//!   write, to a temp path, never to okiba's real State dir — a test must not
+//!   append to the operator's own history.)
+//! - **Two modules do I/O, both behind that seam.** [`shell`] implements
+//!   `AmbienteGit` over `git` subprocesses; [`journal`] appends the invocation
+//!   record. Neither is reachable from the engine — the dependency runs the
+//!   other way.
+//!
+//! They live here rather than in the binary because a *library* consumer needs
+//! them: the oracle and the future hook entrypoint are separate programs that
+//! must both read a real repository through the same proven invocations. Putting
+//! them in the binary would force the second consumer to re-derive them, which
+//! is the duplication this whole design exists to remove.
 //!
 //! # The one invariant this crate exists to enforce
 //!
@@ -733,6 +756,7 @@ pub fn prova(regras: &[Regra]) -> (usize, Vec<Prova>) {
     (regras.len(), rows)
 }
 
+pub mod journal;
 pub mod shell;
 
 #[cfg(test)]
