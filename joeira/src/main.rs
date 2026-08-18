@@ -13,10 +13,7 @@
 //! state of every container, sandbox, CI runner and daemon.
 
 use clap::{Parser, Subcommand};
-use joeira_core::{
-    AmbienteMock, ClasseFalsoPositivo, Ponto, Predicado, Regra, Reversibilidade, Severidade,
-    Veredito, avalia, prova,
-};
+use joeira_core::{AmbienteMock, Ponto, Predicado, Regra, Severidade, Veredito, avalia, prova};
 
 #[derive(Parser)]
 #[command(name = "joeira", about = "The typed git-hook control plane")]
@@ -32,7 +29,16 @@ enum Comando {
     Eval,
     /// Prove every rule in both directions against its own witnesses. Exits
     /// non-zero on a red row OR on an empty corpus.
-    Prova,
+    Prova {
+        /// Prove the WHOLE catalog and print its denominator, refusing to
+        /// report green if any catalog form was not reached.
+        ///
+        /// It exists because "every rule passed" and "every rule I happened to
+        /// build passed" print identically. `--all` makes the second one an
+        /// error by comparing the corpus against the catalog it came from.
+        #[arg(long)]
+        all: bool,
+    },
     /// Print the mount points and what each may read.
     Pontos,
 }
@@ -40,7 +46,7 @@ enum Comando {
 fn main() -> anyhow::Result<()> {
     match Cli::parse().comando {
         Comando::Eval => cmd_eval(),
-        Comando::Prova => cmd_prova(),
+        Comando::Prova { all } => cmd_prova(all),
         Comando::Pontos => {
             for p in Ponto::todos() {
                 println!("  {:<12} reads {:?}", p.arquivo(), p.leitura());
@@ -51,7 +57,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn cmd_eval() -> anyhow::Result<()> {
-    let regras = corpus();
+    let regras = corpus()?;
     // A synthetic index carrying one of everything, so `eval` demonstrates each
     // arm rather than needing a repository.
     let amb = AmbienteMock::com_mensagem("init")
@@ -79,8 +85,27 @@ fn cmd_eval() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_prova() -> anyhow::Result<()> {
-    let regras = corpus();
+fn cmd_prova(all: bool) -> anyhow::Result<()> {
+    let regras = corpus()?;
+
+    if all {
+        // The denominator check, and it is the reason `--all` exists. `corpus`
+        // already errors on an unwitnessed form, so this is belt-and-braces
+        // against a future change that made the join lossy instead of fatal.
+        let no_catalogo = joeira_lisp::ler_catalogo(joeira_lisp::CATALOGO)
+            .map_err(|e| anyhow::anyhow!("catalog: {e}"))?
+            .len();
+        println!(
+            "catalog: {no_catalogo} forms, corpus: {} rules",
+            regras.len()
+        );
+        anyhow::ensure!(
+            regras.len() == no_catalogo,
+            "corpus has {} rules but the catalog declares {no_catalogo} —              refusing to report green over a subset",
+            regras.len()
+        );
+    }
+
     let (n, rows) = prova(&regras);
 
     // An empty corpus reports the same green as a proven one unless it is
@@ -110,81 +135,249 @@ fn cmd_prova() -> anyhow::Result<()> {
 /// SYNTHETIC-FIXTURE — the witnesses below are invented test data, never real
 /// secrets. See `joeira-core/src/tests.rs` for why the marker is here.
 ///
-/// The four incumbent concerns, ported as data. Kept in the binary for P0 so the
-/// oracle has something to compare; it moves to the `(defjoeira …)` corpus with
-/// `joeira-lisp`'s derive.
-fn corpus() -> Vec<Regra> {
-    let placeholders: Vec<String> = ["init", "update", "updates", "wip", "fix", "test"]
-        .iter()
-        .map(|s| (*s).to_owned())
-        .collect();
+/// ── THE SPLIT, AND WHY IT IS WHERE IT IS ─────────────────────────────────
+///
+/// The rule's IDENTITY comes from `joeira-lisp`'s catalog — name, mount point,
+/// both severity axes, the operator message, and the 77-word placeholder list.
+/// Its WITNESSES come from here, because a witness is a mock `AmbienteGit` and
+/// tatara-lisp has no way to spell one; inventing a lisp surface for mock
+/// filesystems would be a richer authoring language than the derive will ever
+/// generate, which is the trap `joeira-lisp`'s own header warns about.
+///
+/// The two halves are joined BY NAME, and the join is asserted total in both
+/// directions (`the_catalog_and_the_witnesses_are_in_bijection`). That matters
+/// more than it looks: without the reverse check, a catalog form with no
+/// witnesses would be silently skipped and `prova` would report green over a
+/// corpus smaller than the catalog it claims to prove.
+///
+/// The FLOOR is also here rather than in the catalog. A floor is a deployment
+/// decision — what this installation does today — not part of the rule's
+/// identity, and the fleet's authority for it is `pleme.gitHooks.rules.<n>.floor`
+/// in the nix repo, where it is clamped to the derived ceiling. Nothing here may
+/// exceed a ceiling either: `Regra::com_piso` clamps, so a floor written above
+/// the axes' ceiling is corrected rather than honoured.
+fn corpus() -> anyhow::Result<Vec<Regra>> {
+    let formas = joeira_lisp::ler_catalogo(joeira_lisp::CATALOGO)
+        .map_err(|e| anyhow::anyhow!("the compiled-in catalog does not parse: {e}"))?;
+    anyhow::ensure!(
+        !formas.is_empty(),
+        "the catalog is EMPTY — refusing to build a corpus that proves nothing"
+    );
 
-    vec![
-        Regra::nova(
-            "msg-placeholder-subject",
-            Ponto::CommitMsg,
-            Predicado::Algum(vec![
+    let mut regras = Vec::with_capacity(formas.len());
+    for f in &formas {
+        let t = testemunhas(f).ok_or_else(|| {
+            anyhow::anyhow!(
+                "catalog form {:?} has no witnesses in this binary — a rule that \
+                 cannot be proven in both directions must not ship silently",
+                f.nome
+            )
+        })?;
+        let rev = f
+            .reversibilidade
+            .ok_or_else(|| anyhow::anyhow!("catalog form {:?} omits :reversibilidade", f.nome))?;
+        let fp =
+            f.fp.ok_or_else(|| anyhow::anyhow!("catalog form {:?} omits :fp", f.nome))?;
+
+        let mut r = Regra::nova(
+            &f.nome,
+            f.ponto,
+            t.predicado,
+            rev,
+            fp,
+            &f.mensagem,
+            t.bloqueia,
+            t.passa,
+        );
+        if let Some(piso) = t.piso {
+            r = r.com_piso(piso);
+        }
+        regras.push(r);
+    }
+    Ok(regras)
+}
+
+/// What the catalog cannot carry: the predicate, its two witnesses, and the
+/// floor this installation acts at.
+struct Testemunhas {
+    predicado: Predicado,
+    bloqueia: AmbienteMock,
+    passa: AmbienteMock,
+    piso: Option<Severidade>,
+}
+
+/// Every name the catalog may use. `None` for an unknown name rather than a
+/// panic, so `corpus` can report WHICH form is unwitnessed.
+fn testemunhas(f: &joeira_lisp::FormaLida) -> Option<Testemunhas> {
+    Some(match f.nome.as_str() {
+        "msg-placeholder-subject" => Testemunhas {
+            // BOTH arms, and neither is optional. The whole lowercased-trimmed
+            // subject catches `init`; the tail after the last colon catches
+            // `chore: wip`. Dropping either makes the corpus disagree with the
+            // incumbent on a class rather than on a word, which would read as a
+            // behavioural difference when it is a missing arm.
+            predicado: Predicado::Algum(vec![
                 Predicado::AssuntoNaLista {
-                    lista: placeholders.clone(),
+                    lista: f.lista.clone(),
                 },
                 Predicado::AssuntoCaudaNaLista {
-                    lista: placeholders,
+                    lista: f.lista.clone(),
                 },
             ]),
-            Reversibilidade::Custoso,
-            ClasseFalsoPositivo::TokenExato,
-            "placeholder subject — say what changed and why",
-            AmbienteMock::com_mensagem("init"),
-            AmbienteMock::com_mensagem("joeira: port the incumbent concerns"),
-        ),
-        Regra::nova(
-            "msg-ai-attribution-trailer",
-            Ponto::CommitMsg,
-            Predicado::MensagemTemTrailer {
+            bloqueia: AmbienteMock::com_mensagem("init"),
+            passa: AmbienteMock::com_mensagem("joeira: port the incumbent concerns"),
+            piso: None,
+        },
+        "msg-ai-attribution-trailer" => Testemunhas {
+            predicado: Predicado::MensagemTemTrailer {
                 marcadores: vec!["Co-Authored-By:".into(), "Claude-Session:".into()],
             },
-            Reversibilidade::Custoso,
-            ClasseFalsoPositivo::TokenExato,
-            "AI-attribution trailer present",
-            AmbienteMock::com_mensagem("feat: x\n\nClaude-Session: abc"),
-            AmbienteMock::com_mensagem("feat: x\n\nplain body"),
-        ),
-        Regra::nova(
-            "vcs-conflict-markers",
-            Ponto::PreCommit,
-            Predicado::BlobTemParDeLinhas {
+            bloqueia: AmbienteMock::com_mensagem("feat: x\n\nClaude-Session: abc"),
+            passa: AmbienteMock::com_mensagem("feat: x\n\nplain body"),
+            piso: None,
+        },
+        "vcs-conflict-markers" => Testemunhas {
+            predicado: Predicado::BlobTemParDeLinhas {
                 abre: "<<<<<<< ".into(),
                 fecha: ">>>>>>> ".into(),
             },
-            Reversibilidade::Custoso,
-            ClasseFalsoPositivo::ZeroEstrutural,
-            "unresolved merge-conflict markers in the staged blob",
-            AmbienteMock::default().com_stage("flake.lock", "<<<<<<< HEAD\nx\n>>>>>>> them\n"),
-            AmbienteMock::default().com_stage("README.md", "# T\n\n=======\n"),
-        )
-        // Structurally FP-free and costly-to-recover, so its ceiling is Bloqueia
-        // and raising the floor there is evidenced rather than asserted.
-        .com_piso(Severidade::Bloqueia),
-        Regra::nova(
-            "fresh-cargo-gen-lock",
-            Ponto::PreCommit,
-            Predicado::AmarraDeHash {
+            bloqueia: AmbienteMock::default()
+                .com_stage("flake.lock", "<<<<<<< HEAD\nx\n>>>>>>> them\n"),
+            // A LONE `=======` line, deliberately: it is the marker most likely
+            // to appear in legitimate content (a reStructuredText heading rule,
+            // an ASCII table), and a rule that tripped on it would be a prose
+            // matcher wearing a structural label.
+            passa: AmbienteMock::default().com_stage("README.md", "# T\n\n=======\n"),
+            piso: Some(Severidade::Bloqueia),
+        },
+        "gen-lock-tie" => Testemunhas {
+            predicado: Predicado::AmarraDeHash {
                 arquivo: "Cargo.lock".into(),
                 sidecar: "Cargo.gen.lock".into(),
                 campo: "cargo_lock_sha256".into(),
             },
-            Reversibilidade::Custoso,
-            ClasseFalsoPositivo::ZeroEstrutural,
-            "Cargo.gen.lock records a different Cargo.lock than this commit contains",
-            AmbienteMock::default()
+            bloqueia: AmbienteMock::default()
                 .com_stage("Cargo.lock", "l")
                 .com_stage("Cargo.gen.lock", r#"{"cargo_lock_sha256": "deadbeef"}"#)
                 .com_sha("Cargo.lock", "cafebabe"),
-            AmbienteMock::default()
+            passa: AmbienteMock::default()
                 .com_stage("Cargo.lock", "l")
                 .com_stage("Cargo.gen.lock", r#"{"cargo_lock_sha256": "cafebabe"}"#)
                 .com_sha("Cargo.lock", "cafebabe"),
-        )
-        .com_piso(Severidade::Bloqueia),
-    ]
+            piso: Some(Severidade::Bloqueia),
+        },
+        // The prose matcher, at the ratchet tier its axes derive. Its witnesses
+        // are the two shapes that matter: a real credential line, and the
+        // `secret::` path expression that made the incumbent refuse a commit
+        // containing no credential at all.
+        "sec-plaintext-credential" => Testemunhas {
+            // ADDED lines, not the whole blob — the same judgement the
+            // incumbent makes. A rule reading the whole blob refuses a commit
+            // for a credential that was already there, which punishes the
+            // author who touched the file rather than the one who added it.
+            predicado: Predicado::LinhaAdicionadaCasa {
+                padroes: vec![
+                    joeira_core::Padrao::novo(
+                        "plaintext-credential",
+                        // Every narrowing here is the incumbent's, measured
+                        // against its false-positive corpus rather than
+                        // invented. `(^|[^A-Za-z0-9])` is the whole-word
+                        // lookbehind this engine does not have, so `mysecret:`
+                        // and `SecretBearing` no longer match while
+                        // `client_secret =` still does. `[^:\s]` after the
+                        // separator is what stops a path expression
+                        // (`std::secret::x`) reading as `secret:` followed by
+                        // a long value — found by the gate refusing a commit
+                        // that contained no credential. `\S{7,}` is what lets
+                        // `password: <redacted>` through.
+                        r"(?i)(^|[^A-Za-z0-9])(password|passwd|secret|client_secret)\s*[:=]\s*[^:\s]\S{7,}",
+                    )
+                    .ok()?,
+                ],
+            },
+            bloqueia: AmbienteMock::default()
+                .com_stage("notes.txt", "password: correcthorsebattery\n"),
+            passa: AmbienteMock::default().com_stage(
+                "lib.rs",
+                "use cofre_secret::Secret::new;\nlet x = std::secret::y;\n",
+            ),
+            piso: None,
+        },
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The join between the catalog and the witnesses, asserted in BOTH
+    /// directions.
+    ///
+    /// The forward direction is already fatal in `corpus` — an unwitnessed form
+    /// is an error, not a skip. This pins the reverse: a witness arm whose
+    /// catalog form was deleted becomes dead code that no longer proves
+    /// anything, and nothing else would say so. Counted rather than inspected,
+    /// because a count is what `prova --all` compares.
+    #[test]
+    fn the_catalog_and_the_witnesses_are_in_bijection() {
+        let formas = joeira_lisp::ler_catalogo(joeira_lisp::CATALOGO).expect("catalog parses");
+        let regras = corpus().expect("corpus builds");
+        assert_eq!(
+            regras.len(),
+            formas.len(),
+            "every catalog form must reach the corpus"
+        );
+
+        // The reverse: name every arm `testemunhas` answers, and require each to
+        // be a form. Kept as a literal list on purpose — deriving it from the
+        // catalog would make the test compare the catalog to itself.
+        let arms = [
+            "msg-placeholder-subject",
+            "msg-ai-attribution-trailer",
+            "vcs-conflict-markers",
+            "gen-lock-tie",
+            "sec-plaintext-credential",
+        ];
+        for a in arms {
+            assert!(
+                formas.iter().any(|f| f.nome == a),
+                "witness arm {a:?} has no catalog form — it proves nothing"
+            );
+        }
+        assert_eq!(arms.len(), formas.len(), "no arm is unreachable");
+    }
+
+    /// The corpus carries the REAL list, not the six words the binary shipped
+    /// with. Asserted here as well as in `joeira-lisp` because this is the
+    /// surface the oracle will compare against the incumbent, and a size
+    /// difference would read as a behavioural disagreement.
+    #[test]
+    fn the_placeholder_rule_carries_all_77_words() {
+        let formas = joeira_lisp::ler_catalogo(joeira_lisp::CATALOGO).expect("parses");
+        let msg = formas
+            .iter()
+            .find(|f| f.nome == "msg-placeholder-subject")
+            .expect("present");
+        assert_eq!(msg.lista.len(), 77);
+        let t = testemunhas(msg).expect("witnessed");
+        // Both arms, each carrying the full list — the reason this is checked
+        // through the predicate rather than the form is that a bug cloning only
+        // one arm would leave the form correct and the rule half-blind.
+        match t.predicado {
+            Predicado::Algum(ref arms) => {
+                assert_eq!(arms.len(), 2, "whole-subject AND tail-after-colon");
+                for a in arms {
+                    match a {
+                        Predicado::AssuntoNaLista { lista }
+                        | Predicado::AssuntoCaudaNaLista { lista } => {
+                            assert_eq!(lista.len(), 77, "both arms carry the full list");
+                        }
+                        outro => panic!("unexpected arm: {outro:?}"),
+                    }
+                }
+            }
+            ref outro => panic!("expected Algum, got {outro:?}"),
+        }
+    }
 }

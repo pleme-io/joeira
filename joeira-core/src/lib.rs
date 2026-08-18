@@ -154,6 +154,34 @@ pub enum Reversibilidade {
     Recuperavel,
 }
 
+impl Reversibilidade {
+    /// Every variant, in decreasing severity of consequence.
+    ///
+    /// Exhaustive by construction rather than by discipline: the array is
+    /// matched against `Self` below, so adding a variant without adding it here
+    /// is a non-exhaustive-match compile error, not a roster that silently
+    /// drifts one short.
+    #[must_use]
+    pub const fn todos() -> &'static [Self] {
+        &[Self::Irreversivel, Self::Custoso, Self::Recuperavel]
+    }
+
+    /// The authoring symbol, identical to the serde name.
+    ///
+    /// ONE source for the spelling. A second hand-written table — in the lisp
+    /// reader, in a CLI parser, in an error message — is the duplication that
+    /// lets `irreversivel` and `irreversible` both exist and mean the same
+    /// thing until one of them silently stops matching.
+    #[must_use]
+    pub const fn simbolo(self) -> &'static str {
+        match self {
+            Self::Irreversivel => "irreversivel",
+            Self::Custoso => "custoso",
+            Self::Recuperavel => "recuperavel",
+        }
+    }
+}
+
 /// How a rule fails when it is wrong — the axis that decides whether it may
 /// block. This is the one that gets skipped, and skipping it is how a gate
 /// earns a reputation for crying wolf.
@@ -169,6 +197,42 @@ pub enum ClasseFalsoPositivo {
     Limiar,
     /// Matches prose. The FP-generating class.
     Prosa,
+}
+
+impl ClasseFalsoPositivo {
+    /// Every variant, in increasing false-positive rate.
+    #[must_use]
+    pub const fn todos() -> &'static [Self] {
+        &[
+            Self::ZeroEstrutural,
+            Self::TokenExato,
+            Self::Limiar,
+            Self::Prosa,
+        ]
+    }
+
+    /// The authoring symbol, identical to the serde name.
+    #[must_use]
+    pub const fn simbolo(self) -> &'static str {
+        match self {
+            Self::ZeroEstrutural => "zero-estrutural",
+            Self::TokenExato => "token-exato",
+            Self::Limiar => "limiar",
+            Self::Prosa => "prosa",
+        }
+    }
+
+    /// Whether a rule on this predicate class may refuse a commit.
+    ///
+    /// Derived from the variant, never stored: a soft predicate's false
+    /// positive refuses work that carries nothing wrong, so it may warn and
+    /// never block. `Severidade::tecto` already encodes this through the
+    /// lattice; this is the same fact addressable directly, which is what the
+    /// nix gate's `githooks-blocks-are-structural-only` row compares against.
+    #[must_use]
+    pub const fn pode_recusar(self) -> bool {
+        matches!(self, Self::ZeroEstrutural | Self::TokenExato)
+    }
 }
 
 /// What a rule does when it fires.

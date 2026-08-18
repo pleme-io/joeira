@@ -1,0 +1,111 @@
+;; joeira.tlisp — the fleet's git-hook concerns, as data.
+;;
+;; ── WHY THIS FILE EXISTS ──────────────────────────────────────────────────
+;;
+;; Every concern the incumbent tatara-script hooks enforce, declared once as
+;; `(defjoeira …)` forms rather than as Rust literals inside a binary. The
+;; binary's corpus was six hand-typed placeholder words; the fleet's real list
+;; is 77. A byte-parity comparison against the incumbent is meaningless until
+;; this file is the source, because every disagreement would be a list-size
+;; artifact rather than a behavioural difference.
+;;
+;; ── THE ONE-SOURCE QUESTION, STATED HONESTLY ──────────────────────────────
+;;
+;; The 77 words below are transcribed from `nix/lib/git-placeholder-subjects.nix`
+;; in the private fleet repo, and they are therefore a SECOND copy of that list
+;; — exactly the duplication this project exists to remove. It is recorded
+;; rather than hidden, and it is the right direction of copy: the list is
+;; generic OSS data with no fleet identity in it, so joeira is its correct home
+;; and the nix side is what should become the projection.
+;;
+;; Closing it needs `inputs.joeira` in the nix flake, which the nix repo does
+;; not carry yet. Until then the two are aligned by transcription, generated
+;; from the nix list rather than retyped, and the count is asserted on both
+;; sides (77, all unique, verified 2026-08-18).
+;;
+;; `pending-joeira: subjects-single-source (nix reads joeira, not a copy)`
+;;
+;; ── READING THE AXES ──────────────────────────────────────────────────────
+;;
+;; `:reversibilidade` x `:fp` derives the severity CEILING; no form declares a
+;; severity, because a rule does not get to say what it does when it fires. The
+;; two axes are facts about the world and the ceiling is a total function of
+;; them, so "a block with no evidence behind it" has no spelling here at all.
+
+;; ── commit-msg ────────────────────────────────────────────────────────────
+;;
+;; `costly` and not `recoverable`: `git commit --amend` is trivial before a
+;; push, and after one it means force-pushing a branch under concurrent agent
+;; sessions. `token-exato` because the match is a closed word list against a
+;; normalized subject — the whole lowercased-trimmed subject, and the tail
+;; after the last colon, so `fix` is refused while `fix: <what>` passes.
+(defjoeira
+  :nome "msg-placeholder-subject"
+  :ponto commit-msg
+  :reversibilidade custoso
+  :fp token-exato
+  :mensagem "commit subject carries no information — say what changed and why"
+  :lista (
+    "init" "initial" "initial commit" "wip" "work in progress" "updateinit"
+    "initupdate" "update" "updates" "updated" "change" "changes"
+    "changed" "edit" "edits" "fix" "fixes" "fixed"
+    "patch" "tweak" "tweaks" "cleanup" "clean" "refactor"
+    "revert" "merge" "temp" "tmp" "test" "tests"
+    "testing" "stuff" "things" "misc" "junk" "scratch"
+    "foo" "bar" "baz" "asdf" "qwerty" "x"
+    "y" "z" "a" "." ".." "commit"
+    "save" "saved" "checkpoint" "snapshot" "backup" "work"
+    "working" "progress" "done" "ok" "okay" "more"
+    "new" "minor" "nit" "small" "quick" "feat"
+    "feature" "chore" "docs" "doc" "style" "perf"
+    "build" "ci" "refactor!" "hotfix" "bugfix"
+  ))
+
+;; ── pre-commit ────────────────────────────────────────────────────────────
+;;
+;; Matches an exact structural pair, so `zero-estrutural` is literal rather
+;; than aspirational, and the cost is a wedge rather than a nuisance — marker
+;; lines reached `main` in flake.lock twice in three days.
+(defjoeira
+  :nome "vcs-conflict-markers"
+  :ponto pre-commit
+  :reversibilidade custoso
+  :fp zero-estrutural
+  :mensagem "staged blob contains unresolved merge-conflict markers")
+
+;; The strongest form in the catalog: it re-runs the consumer's own hash
+;; arithmetic rather than matching a shape. Judged on the INDEX, because
+;; `gen confirm` reads the worktree and reports "fresh" for exactly this
+;; mistake.
+(defjoeira
+  :nome "gen-lock-tie"
+  :ponto pre-commit
+  :reversibilidade custoso
+  :fp zero-estrutural
+  :mensagem "staged index would break the gen delta tie (D2)")
+
+;; `prosa`, and the ceiling that falls out of it (`warn`) is the point rather
+;; than a limitation. The incumbent blocks on this, and its own comment records
+;; a commit it refused that contained no credential; roughly 13 of 37 recorded
+;; `--no-verify` bypasses are attributed to it.
+(defjoeira
+  :nome "sec-plaintext-credential"
+  :ponto pre-commit
+  :reversibilidade irreversivel
+  :fp prosa
+  :mensagem "staged blob may carry a plaintext credential")
+
+;; joeira's own addition, and the divergence from the incumbent is the point:
+;; `stripCoAuthored` REWRITES the message, while this DETECTS it. No severity
+;; models a mutation — advise/warn/block all describe what happens to a commit
+;; that is otherwise going through — so a mutation needs its own verb and does
+;; not belong in this catalog as a mis-typed row. The detection is a legitimate
+;; rule; the rewrite is a separate surface joeira does not yet have.
+;;
+;; `pending-joeira: mutation-verb (stripCoAuthored has no home here)`
+(defjoeira
+  :nome "msg-ai-attribution-trailer"
+  :ponto commit-msg
+  :reversibilidade custoso
+  :fp token-exato
+  :mensagem "commit message carries an AI-attribution trailer")
