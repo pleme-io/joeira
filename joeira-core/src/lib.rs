@@ -733,5 +733,7 @@ pub fn prova(regras: &[Regra]) -> (usize, Vec<Prova>) {
     (regras.len(), rows)
 }
 
+pub mod shell;
+
 #[cfg(test)]
 mod tests;

@@ -1,0 +1,19 @@
+[package]
+name = "joeira-ratchet"
+description = "The baseline ratchet: recorded debt that may shrink or hold but never grow, plus the orphan direction"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# ZERO dependencies, and that is a property to defend rather than an accident.
+# The lifted original (skill-lint/src/ratchet.rs) was `std`-only, which is what
+# makes it adoptable by a gate in any repo without dragging a dependency graph
+# behind it. Adding serde here would cost that, and nothing in the grammar needs
+# it — the wire format is a line of text on purpose.
+[dependencies]
+
+[lints]
+workspace = true
