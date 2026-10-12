@@ -1,13 +1,62 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use joeira_core::camadas::{
+    Borda, Fontes, Lida, Resolucao, caminho_sistema, caminho_usuario, le_camada, resolve,
+};
 use joeira_core::journal::{Diario, Registro, TagVeredito};
-use joeira_core::shell::{AmbienteShell, raiz_de};
+use joeira_core::shell::{AmbienteShell, autoridade_de, raiz_de};
 use joeira_core::{
     AmbienteGit, Nivel, Ponto, Regra, Severidade, Veredito, Verificador, avalia, le_envios,
 };
 
 pub const CHAVE_DESLIGA: &str = "JOEIRA_OFF";
+pub const CHAVE_SEM_BORDA: &str = "JOEIRA_SEM_BORDA";
+pub const ARQUIVOS_DE_BORDA: &[&str] = &["joeira.lisp", "caixa.lisp"];
+
+pub fn le_borda(raiz: &Path) -> Lida<Borda> {
+    for nome in ARQUIVOS_DE_BORDA {
+        let caminho = raiz.join(nome);
+        let fonte = caminho.display().to_string();
+        let texto = match std::fs::read_to_string(&caminho) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Some((fonte, Err(e.to_string()))),
+        };
+        match joeira_lisp::ler_borda(&texto) {
+            Ok(Some(b)) => return Some((fonte, Ok(b))),
+            Ok(None) => {}
+            Err(e) => return Some((fonte, Err(e.to_string()))),
+        }
+    }
+    None
+}
+
+pub fn em_camadas(regras: &[Regra], raiz: &Path) -> Resolucao {
+    let sem_borda = std::env::var(CHAVE_SEM_BORDA).is_ok_and(|v| v == "1");
+    let fontes = Fontes {
+        sistema: le_camada(&caminho_sistema()),
+        usuario: caminho_usuario().and_then(|p| le_camada(&p)),
+        borda: if sem_borda { None } else { le_borda(raiz) },
+        autoridade: autoridade_de(raiz).ok(),
+    };
+    if sem_borda {
+        eprintln!("joeira: the repository edge layer is ignored ({CHAVE_SEM_BORDA}=1)");
+    }
+    resolve(regras.to_vec(), &fontes)
+}
+
+pub fn relata_recusas(onde: &str, r: &Resolucao) {
+    for x in &r.recusas {
+        eprintln!("joeira {onde}: REFUSED {x}");
+    }
+}
+
+fn julga_em_camadas(ponto: Ponto, regras: &[Regra], amb: &AmbienteShell, repo: &Path) {
+    let res = em_camadas(regras, repo);
+    relata_recusas(ponto.arquivo(), &res);
+    julga(ponto, &res.regras, amb, repo, Diario::padrao().as_ref());
+}
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Balanco {
@@ -119,13 +168,7 @@ pub fn pre_commit(regras: &[Regra]) {
     protegido(Ponto::PreCommit, || {
         let repo = raiz()?;
         let amb = AmbienteShell::novo(&repo);
-        julga(
-            Ponto::PreCommit,
-            regras,
-            &amb,
-            &repo,
-            Diario::padrao().as_ref(),
-        );
+        julga_em_camadas(Ponto::PreCommit, regras, &amb, &repo);
         Ok(())
     });
 }
@@ -143,13 +186,7 @@ pub fn commit_msg(regras: &[Regra], arquivo: &Path) {
         }
         let repo = raiz()?;
         let amb = AmbienteShell::novo(&repo).com_mensagem(&msg);
-        julga(
-            Ponto::CommitMsg,
-            regras,
-            &amb,
-            &repo,
-            Diario::padrao().as_ref(),
-        );
+        julga_em_camadas(Ponto::CommitMsg, regras, &amb, &repo);
         Ok(())
     });
 }
@@ -170,13 +207,7 @@ pub fn pre_push(regras: &[Regra], remoto: &str, url: &str) {
         }
         let repo = raiz()?;
         let amb = AmbienteShell::novo(&repo).com_envios(vivos);
-        julga(
-            Ponto::PrePush,
-            regras,
-            &amb,
-            &repo,
-            Diario::padrao().as_ref(),
-        );
+        julga_em_camadas(Ponto::PrePush, regras, &amb, &repo);
         Ok(())
     });
 }
@@ -188,12 +219,28 @@ pub fn explain(regras: &[Regra], staged: bool) -> anyhow::Result<()> {
     );
     let repo = raiz()?;
     let amb = AmbienteShell::novo(&repo);
+    let res = em_camadas(regras, &repo);
     println!("joeira explain --staged in {}", repo.display());
     println!(
         "source: joeira-lisp/catalogo/joeira.tlisp (compiled in), joeira {}",
         env!("CARGO_PKG_VERSION")
     );
-    for r in regras {
+    for x in &res.recusas {
+        println!("  REFUSED {x}");
+    }
+    for (nome, o) in &res.subtraidas {
+        println!("  -      {nome}\n         subtracted by {}", o.rotulo());
+    }
+    for r in &res.regras {
+        let origem = res.origem(r.nome()).map_or_else(
+            || "unknown".to_owned(),
+            joeira_core::camadas::Origem::rotulo,
+        );
+        let isentos = if r.isencoes().is_empty() {
+            String::new()
+        } else {
+            format!("; exempt under {}", r.isencoes().join(", "))
+        };
         let cabeca = format!(
             "{} @{} layer={} trigger={}",
             r.nome(),
@@ -202,11 +249,11 @@ pub fn explain(regras: &[Regra], staged: bool) -> anyhow::Result<()> {
             r.gatilho().unwrap_or("-")
         );
         let porque = format!(
-            "axes {} x {} => ceiling {:?}; floor {:?}; acts at Avisa (P1)",
+            "axes {} x {} => ceiling {}; effective floor {} set by {origem}{isentos}; P1 advisory: acts at most avisa, exit 0",
             r.reversibilidade().simbolo(),
             r.fp().simbolo(),
-            r.tecto(),
-            r.severidade()
+            r.tecto().simbolo(),
+            r.severidade().simbolo()
         );
         if r.ponto() != Ponto::PreCommit {
             println!(

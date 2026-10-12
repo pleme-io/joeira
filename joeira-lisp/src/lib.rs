@@ -394,6 +394,418 @@ fn tokenise(fonte: &str) -> Result<Vec<String>, ErroDeLeitura> {
     Ok(toks)
 }
 
+pub const BORDA_MAX_BYTES: usize = 64 * 1024;
+pub const BORDA_MAX_CLAUSULAS: usize = 64;
+pub const BORDA_MAX_CAMINHOS: usize = 32;
+pub const BORDA_MAX_TEXTO: usize = 256;
+pub const BORDA_MAX_PROFUNDIDADE: usize = 32;
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ErroDeBorda {
+    #[error("edge source is {achado} bytes, over the {max}-byte limit")]
+    GrandeDemais { achado: usize, max: usize },
+    #[error("unbalanced parentheses or an unterminated string")]
+    Desbalanceada,
+    #[error("forms nest deeper than {max}")]
+    FundaDemais { max: usize },
+    #[error("more than one (defjoeira-borda …) form")]
+    Duplicada,
+    #[error("{achado} {oque}, over the limit of {max}")]
+    AlemDoLimite {
+        oque: &'static str,
+        achado: usize,
+        max: usize,
+    },
+    #[error("unknown verb `{verbo}` (recognised: {conhecidos})")]
+    VerboDesconhecido { verbo: String, conhecidos: String },
+    #[error("`{verbo}` clause malformed: {porque}")]
+    ClausulaMalFormada { verbo: String, porque: String },
+    #[error("`{verbo}` on `{regra}`: unknown severity `{achado}` (recognised: {conhecidas})")]
+    SeveridadeDesconhecida {
+        verbo: String,
+        regra: String,
+        achado: String,
+        conhecidas: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Expr {
+    Atomo(String),
+    Texto(String),
+    Lista(Vec<Expr>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Tok {
+    Abre,
+    Fecha,
+    Atomo(String),
+    Texto(String),
+}
+
+fn tokens_de_borda(fonte: &str) -> Result<Vec<Tok>, ErroDeBorda> {
+    let mut toks = Vec::new();
+    let mut cs = fonte.chars().peekable();
+    while let Some(c) = cs.next() {
+        match c {
+            '(' => toks.push(Tok::Abre),
+            ')' => toks.push(Tok::Fecha),
+            ';' => {
+                for d in cs.by_ref() {
+                    if d == '\n' {
+                        break;
+                    }
+                }
+            }
+            '"' => {
+                let mut t = String::new();
+                let mut fechou = false;
+                while let Some(d) = cs.next() {
+                    match d {
+                        '"' => {
+                            fechou = true;
+                            break;
+                        }
+                        '\\' => {
+                            if let Some(e) = cs.next() {
+                                t.push(e);
+                            }
+                        }
+                        d => t.push(d),
+                    }
+                }
+                if !fechou {
+                    return Err(ErroDeBorda::Desbalanceada);
+                }
+                toks.push(Tok::Texto(t));
+            }
+            c if c.is_whitespace() => {}
+            c => {
+                let mut t = String::from(c);
+                while let Some(&d) = cs.peek() {
+                    if d.is_whitespace() || matches!(d, '(' | ')' | '"' | ';') {
+                        break;
+                    }
+                    t.push(d);
+                    cs.next();
+                }
+                toks.push(Tok::Atomo(t));
+            }
+        }
+    }
+    Ok(toks)
+}
+
+fn arvore_de_borda(toks: &[Tok]) -> Result<Vec<Expr>, ErroDeBorda> {
+    let mut pilha: Vec<Vec<Expr>> = vec![Vec::new()];
+    for t in toks {
+        match t {
+            Tok::Abre => {
+                if pilha.len() > BORDA_MAX_PROFUNDIDADE {
+                    return Err(ErroDeBorda::FundaDemais {
+                        max: BORDA_MAX_PROFUNDIDADE,
+                    });
+                }
+                pilha.push(Vec::new());
+            }
+            Tok::Fecha => {
+                let feita = pilha.pop().ok_or(ErroDeBorda::Desbalanceada)?;
+                pilha
+                    .last_mut()
+                    .ok_or(ErroDeBorda::Desbalanceada)?
+                    .push(Expr::Lista(feita));
+            }
+            Tok::Atomo(a) => pilha
+                .last_mut()
+                .ok_or(ErroDeBorda::Desbalanceada)?
+                .push(Expr::Atomo(a.clone())),
+            Tok::Texto(a) => pilha
+                .last_mut()
+                .ok_or(ErroDeBorda::Desbalanceada)?
+                .push(Expr::Texto(a.clone())),
+        }
+    }
+    if pilha.len() != 1 {
+        return Err(ErroDeBorda::Desbalanceada);
+    }
+    Ok(pilha.pop().unwrap_or_default())
+}
+
+fn texto_limitado(verbo: &str, e: &Expr) -> Result<String, ErroDeBorda> {
+    let t = match e {
+        Expr::Texto(t) | Expr::Atomo(t) => t.clone(),
+        Expr::Lista(_) => {
+            return Err(ErroDeBorda::ClausulaMalFormada {
+                verbo: verbo.to_owned(),
+                porque: "expected a string, found a list".to_owned(),
+            });
+        }
+    };
+    if t.is_empty() {
+        return Err(ErroDeBorda::ClausulaMalFormada {
+            verbo: verbo.to_owned(),
+            porque: "empty string".to_owned(),
+        });
+    }
+    if t.len() > BORDA_MAX_TEXTO {
+        return Err(ErroDeBorda::AlemDoLimite {
+            oque: "bytes in one string",
+            achado: t.len(),
+            max: BORDA_MAX_TEXTO,
+        });
+    }
+    Ok(t)
+}
+
+fn severidade_de_borda(
+    verbo: &str,
+    regra: &str,
+    e: &Expr,
+) -> Result<joeira_core::Severidade, ErroDeBorda> {
+    use joeira_core::Severidade;
+    let s = texto_limitado(verbo, e)?;
+    Severidade::todos()
+        .iter()
+        .copied()
+        .find(|x| x.simbolo() == s)
+        .ok_or_else(|| ErroDeBorda::SeveridadeDesconhecida {
+            verbo: verbo.to_owned(),
+            regra: regra.to_owned(),
+            achado: s,
+            conhecidas: Severidade::todos()
+                .iter()
+                .map(|x| x.simbolo())
+                .collect::<Vec<_>>()
+                .join(", "),
+        })
+}
+
+fn clausula_de(e: &Expr) -> Result<joeira_core::camadas::Clausula, ErroDeBorda> {
+    use joeira_core::camadas::{Clausula, Verbo};
+    let Expr::Lista(itens) = e else {
+        return Err(ErroDeBorda::ClausulaMalFormada {
+            verbo: "<none>".to_owned(),
+            porque: "every clause is a parenthesised `(verb \"rule\" …)`".to_owned(),
+        });
+    };
+    let Some(Expr::Atomo(v)) = itens.first() else {
+        return Err(ErroDeBorda::ClausulaMalFormada {
+            verbo: "<none>".to_owned(),
+            porque: "a clause starts with its verb".to_owned(),
+        });
+    };
+    let verbo = Verbo::todos()
+        .iter()
+        .copied()
+        .find(|x| x.simbolo() == v)
+        .ok_or_else(|| ErroDeBorda::VerboDesconhecido {
+            verbo: v.clone(),
+            conhecidos: Verbo::todos()
+                .iter()
+                .map(|x| x.simbolo())
+                .collect::<Vec<_>>()
+                .join(", "),
+        })?;
+    let args = &itens[1..];
+    let aridade = |quer: &str| ErroDeBorda::ClausulaMalFormada {
+        verbo: v.clone(),
+        porque: format!("expected {quer}, got {} arguments", args.len()),
+    };
+    let regra = texto_limitado(v, args.first().ok_or_else(|| aridade("a rule name"))?)?;
+    Ok(match verbo {
+        Verbo::Extend | Verbo::Relax => {
+            if args.len() != 2 {
+                return Err(aridade("a rule and a severity"));
+            }
+            let piso = severidade_de_borda(v, &regra, &args[1])?;
+            if verbo == Verbo::Extend {
+                Clausula::Estende { regra, piso }
+            } else {
+                Clausula::Relaxa { regra, piso }
+            }
+        }
+        Verbo::ExemptPaths => {
+            let caminhos = &args[1..];
+            if caminhos.is_empty() {
+                return Err(aridade("a rule and at least one path prefix"));
+            }
+            if caminhos.len() > BORDA_MAX_CAMINHOS {
+                return Err(ErroDeBorda::AlemDoLimite {
+                    oque: "paths in one exempt-paths clause",
+                    achado: caminhos.len(),
+                    max: BORDA_MAX_CAMINHOS,
+                });
+            }
+            Clausula::IsentaCaminhos {
+                regra,
+                caminhos: caminhos
+                    .iter()
+                    .map(|c| texto_limitado(v, c))
+                    .collect::<Result<_, _>>()?,
+            }
+        }
+        Verbo::Subtract => {
+            if args.len() != 1 {
+                return Err(aridade("exactly a rule name"));
+            }
+            Clausula::Subtrai { regra }
+        }
+    })
+}
+
+pub fn ler_borda(fonte: &str) -> Result<Option<joeira_core::camadas::Borda>, ErroDeBorda> {
+    if fonte.len() > BORDA_MAX_BYTES {
+        return Err(ErroDeBorda::GrandeDemais {
+            achado: fonte.len(),
+            max: BORDA_MAX_BYTES,
+        });
+    }
+    let arvore = arvore_de_borda(&tokens_de_borda(fonte)?)?;
+    let mut achada = None;
+    for e in &arvore {
+        let Expr::Lista(itens) = e else { continue };
+        if itens.first() != Some(&Expr::Atomo("defjoeira-borda".to_owned())) {
+            continue;
+        }
+        if achada.is_some() {
+            return Err(ErroDeBorda::Duplicada);
+        }
+        achada = Some(&itens[1..]);
+    }
+    let Some(corpo) = achada else {
+        return Ok(None);
+    };
+    if corpo.len() > BORDA_MAX_CLAUSULAS {
+        return Err(ErroDeBorda::AlemDoLimite {
+            oque: "clauses",
+            achado: corpo.len(),
+            max: BORDA_MAX_CLAUSULAS,
+        });
+    }
+    Ok(Some(joeira_core::camadas::Borda {
+        clausulas: corpo.iter().map(clausula_de).collect::<Result<_, _>>()?,
+    }))
+}
+
+#[cfg(test)]
+mod testes_borda {
+    use super::*;
+    use joeira_core::Severidade;
+    use joeira_core::camadas::Clausula;
+
+    #[test]
+    fn an_edge_form_reads_every_verb() {
+        let b = ler_borda(
+            r#"
+            (defcaixa :nome "x" (outra (coisa)))
+            ;; the edge
+            (defjoeira-borda
+              (extend "msg-placeholder-subject" avisa)
+              (relax "sec-plaintext-credential" consultivo)
+              (exempt-paths "sec-plaintext-credential" "docs/" "theory/")
+              (subtract "shell-script-beyond-glue"))
+            "#,
+        )
+        .expect("reads")
+        .expect("present");
+        assert_eq!(
+            b.clausulas,
+            vec![
+                Clausula::Estende {
+                    regra: "msg-placeholder-subject".into(),
+                    piso: Severidade::Avisa
+                },
+                Clausula::Relaxa {
+                    regra: "sec-plaintext-credential".into(),
+                    piso: Severidade::Consultivo
+                },
+                Clausula::IsentaCaminhos {
+                    regra: "sec-plaintext-credential".into(),
+                    caminhos: vec!["docs/".into(), "theory/".into()]
+                },
+                Clausula::Subtrai {
+                    regra: "shell-script-beyond-glue".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_caixa_without_an_edge_form_is_none() {
+        assert_eq!(ler_borda(r#"(defcaixa :nome "x")"#), Ok(None));
+    }
+
+    #[test]
+    fn an_unknown_verb_is_refused() {
+        let e = ler_borda(r#"(defjoeira-borda (disarm "sec-plaintext-credential"))"#)
+            .expect_err("refused");
+        assert!(matches!(e, ErroDeBorda::VerboDesconhecido { .. }), "{e}");
+        assert!(e.to_string().contains("exempt-paths"));
+    }
+
+    #[test]
+    fn over_limit_edges_are_typed_errors_not_panics() {
+        let muitas = format!(
+            "(defjoeira-borda {})",
+            "(subtract \"r\") ".repeat(BORDA_MAX_CLAUSULAS + 1)
+        );
+        assert!(matches!(
+            ler_borda(&muitas),
+            Err(ErroDeBorda::AlemDoLimite {
+                oque: "clauses",
+                ..
+            })
+        ));
+        let longa = format!(
+            "(defjoeira-borda (subtract \"{}\"))",
+            "r".repeat(BORDA_MAX_TEXTO + 1)
+        );
+        assert!(matches!(
+            ler_borda(&longa),
+            Err(ErroDeBorda::AlemDoLimite { .. })
+        ));
+        let caminhos = format!(
+            "(defjoeira-borda (exempt-paths \"r\" {}))",
+            "\"p/\" ".repeat(BORDA_MAX_CAMINHOS + 1)
+        );
+        assert!(matches!(
+            ler_borda(&caminhos),
+            Err(ErroDeBorda::AlemDoLimite { .. })
+        ));
+        let funda = format!("{}{}", "(".repeat(10_000), ")".repeat(10_000));
+        assert!(matches!(
+            ler_borda(&funda),
+            Err(ErroDeBorda::FundaDemais { .. })
+        ));
+        let grande = " ".repeat(BORDA_MAX_BYTES + 1);
+        assert!(matches!(
+            ler_borda(&grande),
+            Err(ErroDeBorda::GrandeDemais { .. })
+        ));
+    }
+
+    #[test]
+    fn malformed_edges_are_refused() {
+        assert_eq!(
+            ler_borda("(defjoeira-borda"),
+            Err(ErroDeBorda::Desbalanceada)
+        );
+        assert!(matches!(
+            ler_borda(r#"(defjoeira-borda (relax "r"))"#),
+            Err(ErroDeBorda::ClausulaMalFormada { .. })
+        ));
+        assert!(matches!(
+            ler_borda(r#"(defjoeira-borda (relax "r" loud))"#),
+            Err(ErroDeBorda::SeveridadeDesconhecida { .. })
+        ));
+        assert_eq!(
+            ler_borda("(defjoeira-borda) (defjoeira-borda)"),
+            Err(ErroDeBorda::Duplicada)
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

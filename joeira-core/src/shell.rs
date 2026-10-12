@@ -97,6 +97,32 @@ pub fn raiz_de(dir: &Path) -> Result<PathBuf, JoeiraError> {
     ))
 }
 
+pub fn autoridade_de(dir: &Path) -> Result<PathBuf, JoeiraError> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(dir)
+        .output()
+        .map_err(|e| {
+            JoeiraError::AmbienteCego(format!(
+                "spawning `git rev-parse --git-common-dir` in {}: {e}",
+                dir.display()
+            ))
+        })?;
+    if !out.status.success() {
+        return Err(JoeiraError::AmbienteCego(format!(
+            "`git rev-parse --git-common-dir` in {} exited {}: {}",
+            dir.display(),
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    let comum = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim_end_matches(['\n', '\r']));
+    let comum = comum.canonicalize().unwrap_or(comum);
+    comum.parent().map(Path::to_path_buf).ok_or_else(|| {
+        JoeiraError::AmbienteCego(format!("git common dir {} has no parent", comum.display()))
+    })
+}
+
 /// A repository read through `git` subprocesses.
 pub struct AmbienteShell {
     repo: PathBuf,
@@ -619,6 +645,54 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn git_em(dir: &Path, args: &[&str]) {
+        let ok = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .expect("git runs");
+        assert!(
+            ok.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&ok.stderr)
+        );
+    }
+
+    #[test]
+    fn a_worktree_resolves_the_main_checkout_as_its_authority() {
+        let base = std::env::temp_dir().join(format!("joeira-autoridade-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        git_em(&repo, &["init", "-q"]);
+        git_em(
+            &repo,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "--no-verify",
+                "-m",
+                "c",
+            ],
+        );
+        let arvore = base.join("wt");
+        git_em(
+            &repo,
+            &["worktree", "add", "-q", arvore.to_str().expect("utf8")],
+        );
+        let principal = repo.canonicalize().expect("canon");
+        assert_eq!(autoridade_de(&repo).expect("main"), principal);
+        assert_eq!(autoridade_de(&arvore).expect("worktree"), principal);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     // ── sha256, against published vectors ───────────────────────────────
 

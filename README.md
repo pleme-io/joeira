@@ -25,6 +25,22 @@ metadata`, `cargo fetch --locked`, `cargo fmt --check`, `blue bluefile
 --confirm`, `go mod tidy -diff`, `go vet`, actionlint, new Dockerfile, shell past
 glue). `joeira prova --all` proves each in both directions.
 
+### Layers (P2)
+
+Floors fold system → user → repository edge. `/etc/joeira/sistema.json` and
+`~/.config/joeira/usuario.json` (`JOEIRA_SISTEMA` / `JOEIRA_USUARIO` override
+the paths) are `{"nivel": …, "pisos": {<rule>: consultivo|avisa-com-catraca|avisa|bloqueia}}`;
+only the system file may carry `"concessoes": {<name>: {"prefixo", "verbos", "regras"}}`.
+A layer raises floors only and is clamped to each rule's ceiling; an unknown
+rule is refused by name while its siblings apply. The edge is a
+`(defjoeira-borda (extend "r" avisa) (relax "r" consultivo) (exempt-paths "r" "docs/") (subtract "r"))`
+form in `joeira.lisp` or `caixa.lisp` at the worktree root. `extend` is always
+honoured; the other verbs need a grant whose `prefixo` contains
+`dirname(git rev-parse --git-common-dir)`, so worktrees inherit their repo's
+grant. A malformed layer is dropped and named on every invocation; it never
+blocks. `JOEIRA_SEM_BORDA=1` ignores the edge. `joeira explain --staged` prints
+each rule's effective floor and the layer and path that set it.
+
 ### The honest ceiling, which no later phase may claim away
 
 **A local git hook cannot guarantee anything.** There are four bypasses and the

@@ -818,6 +818,7 @@ pub struct Regra {
     prova_passa: AmbienteMock,
     nivel: Nivel,
     gatilho: Option<String>,
+    isencoes: Vec<String>,
 }
 
 impl Regra {
@@ -847,7 +848,19 @@ impl Regra {
             prova_passa,
             nivel: Nivel::Sistema,
             gatilho: None,
+            isencoes: Vec::new(),
         }
+    }
+
+    #[must_use]
+    pub fn com_isencoes(mut self, isencoes: Vec<String>) -> Self {
+        self.isencoes = isencoes;
+        self
+    }
+
+    #[must_use]
+    pub fn isencoes(&self) -> &[String] {
+        &self.isencoes
     }
 
     #[must_use]
@@ -955,8 +968,72 @@ impl Veredito {
 // The evaluator
 // ═══════════════════════════════════════════════════════════════════
 
+struct Isento<'a, E: ?Sized> {
+    amb: &'a E,
+    prefixos: &'a [String],
+}
+
+impl<E: AmbienteGit + ?Sized> Isento<'_, E> {
+    fn fora(&self, caminhos: Vec<String>) -> Vec<String> {
+        caminhos
+            .into_iter()
+            .filter(|c| !self.prefixos.iter().any(|p| c.starts_with(p.as_str())))
+            .collect()
+    }
+}
+
+impl<E: AmbienteGit + ?Sized> AmbienteGit for Isento<'_, E> {
+    fn mensagem(&self) -> Result<String, JoeiraError> {
+        self.amb.mensagem()
+    }
+    fn caminhos_em_stage(&self) -> Result<Vec<String>, JoeiraError> {
+        Ok(self.fora(self.amb.caminhos_em_stage()?))
+    }
+    fn blob_em_stage(&self, caminho: &str) -> Result<String, JoeiraError> {
+        self.amb.blob_em_stage(caminho)
+    }
+    fn blob_em_head(&self, caminho: &str) -> Result<Option<String>, JoeiraError> {
+        self.amb.blob_em_head(caminho)
+    }
+    fn sha256_em_stage(&self, caminho: &str) -> Result<String, JoeiraError> {
+        self.amb.sha256_em_stage(caminho)
+    }
+    fn caminhos_adicionados(&self) -> Result<Vec<String>, JoeiraError> {
+        Ok(self.fora(self.amb.caminhos_adicionados()?))
+    }
+    fn existe(&self, caminho: &str) -> Result<bool, JoeiraError> {
+        self.amb.existe(caminho)
+    }
+    fn rastreado(&self, caminho: &str) -> Result<bool, JoeiraError> {
+        self.amb.rastreado(caminho)
+    }
+    fn agora_unix(&self) -> Result<u64, JoeiraError> {
+        self.amb.agora_unix()
+    }
+    fn envios(&self) -> Result<Vec<Envio>, JoeiraError> {
+        self.amb.envios()
+    }
+    fn executa(&self, v: Verificador) -> Result<Execucao, JoeiraError> {
+        self.amb.executa(v)
+    }
+}
+
 /// Evaluate one rule against one environment.
 pub fn avalia<E: AmbienteGit + ?Sized>(regra: &Regra, amb: &E) -> Veredito {
+    if regra.isencoes.is_empty() {
+        avalia_em(regra, amb)
+    } else {
+        avalia_em(
+            regra,
+            &Isento {
+                amb,
+                prefixos: &regra.isencoes,
+            },
+        )
+    }
+}
+
+fn avalia_em<E: AmbienteGit + ?Sized>(regra: &Regra, amb: &E) -> Veredito {
     if let Some(g) = &regra.gatilho {
         match amb.existe(g) {
             Ok(true) => {}

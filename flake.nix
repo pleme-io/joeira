@@ -33,12 +33,33 @@
         default = { };
         inherit description;
       };
-      layer = nivel: rules: builtins.toJSON {
-        inherit nivel;
-        pisos = builtins.mapAttrs (_: s: canonical.${s}) rules;
+      grant = types.submodule {
+        options = {
+          pathPrefix = mkOption {
+            type = types.str;
+            description = "Absolute path prefix matched against dirname(git rev-parse --git-common-dir), so every worktree of a granted repository inherits the grant.";
+          };
+          verbs = mkOption {
+            type = types.listOf (types.enum [ "relax" "exempt-paths" "subtract" ]);
+            description = "Edge verbs this grant lets the repository spend. extend needs no grant.";
+          };
+          rules = mkOption {
+            type = types.listOf types.str;
+            description = "Rule names the verbs may touch.";
+          };
+        };
       };
+      pisosOf = rules: builtins.mapAttrs (_: s: canonical.${s}) rules;
       systemLayer = { cfg, ... }: {
-        environment.etc."joeira/sistema.json".text = layer "sistema" cfg.rules;
+        environment.etc."joeira/sistema.json".text = builtins.toJSON {
+          nivel = "sistema";
+          pisos = pisosOf cfg.rules;
+          concessoes = builtins.mapAttrs (_: g: {
+            prefixo = g.pathPrefix;
+            verbos = g.verbs;
+            regras = g.rules;
+          }) cfg.grants;
+        };
       };
     in
     (import "${substrate}/lib/rust-workspace-release-flake.nix" {
@@ -53,6 +74,11 @@
         hmNamespace = "blackmatter.components";
         extraSystemOptions = {
           rules = floors "System-level rules and their floors (fleet rules, floors no lower layer relaxes), rendered to /etc/joeira/sistema.json.";
+          grants = mkOption {
+            type = types.attrsOf grant;
+            default = { };
+            description = "Capabilities a repository edge form (defjoeira-borda ...) may spend, rendered to sistema.json as concessoes. Only the system layer carries grants.";
+          };
         };
         extraNixosConfigFn = systemLayer;
         extraDarwinConfigFn = systemLayer;
@@ -60,12 +86,16 @@
           rules = floors "User-level rules and their floors, rendered to ~/.config/joeira/usuario.json.";
           repoEdge.enable = mkOption {
             type = types.bool;
-            default = false;
-            description = "Read the repository's (defjoeira-borda ...) edge layer. Inert: joeira has no edge discovery yet (JOEIRA.md P2), so this option renders nothing.";
+            default = true;
+            description = "Read the repository's (defjoeira-borda ...) edge layer from joeira.lisp or caixa.lisp at the worktree root. false sets JOEIRA_SEM_BORDA=1 in the session, the rollback that makes every grant inert.";
           };
         };
-        extraHmConfigFn = { cfg, ... }: {
-          xdg.configFile."joeira/usuario.json".text = layer "usuario" cfg.rules;
+        extraHmConfigFn = { cfg, lib, ... }: {
+          xdg.configFile."joeira/usuario.json".text = builtins.toJSON {
+            nivel = "usuario";
+            pisos = pisosOf cfg.rules;
+          };
+          home.sessionVariables = lib.mkIf (!cfg.repoEdge.enable) { JOEIRA_SEM_BORDA = "1"; };
         };
       };
     };
