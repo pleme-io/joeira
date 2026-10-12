@@ -77,6 +77,9 @@ pub enum JoeiraError {
 
     #[error("`{linha}` exceeded its {segundos}s budget and was killed")]
     OrcamentoEsgotado { linha: String, segundos: u64 },
+
+    #[error("not checked: {0}")]
+    NaoVerificavel(String),
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -398,6 +401,29 @@ impl Verificador {
     }
 
     #[must_use]
+    pub fn nao_verificavel(self, erro: &str) -> Option<String> {
+        match self {
+            Self::NixFlakeCheck => {
+                let ultimo = erro
+                    .lines()
+                    .rev()
+                    .map(str::trim)
+                    .find(|l| l.starts_with("error:"))?;
+                let ifd = ultimo.contains("allow-import-from-derivation")
+                    || (ultimo.starts_with("error: path '/nix/store/")
+                        && ultimo.ends_with(".drv' is not valid"));
+                ifd.then(|| {
+                    format!(
+                        "the flake needs import-from-derivation, which `{}` cannot evaluate",
+                        self.linha()
+                    )
+                })
+            }
+            _ => None,
+        }
+    }
+
+    #[must_use]
     pub fn linha(self) -> String {
         let mut l = self.programa().to_owned();
         for a in self.argumentos() {
@@ -412,6 +438,7 @@ impl Verificador {
 pub struct Execucao {
     pub codigo: i32,
     pub saida: String,
+    pub erro: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -730,6 +757,20 @@ impl AmbienteMock {
             Execucao {
                 codigo,
                 saida: String::new(),
+                erro: String::new(),
+            },
+        );
+        self
+    }
+
+    #[must_use]
+    pub fn com_execucao_erro(mut self, v: Verificador, codigo: i32, erro: &str) -> Self {
+        self.execucoes.insert(
+            v,
+            Execucao {
+                codigo,
+                saida: String::new(),
+                erro: erro.to_owned(),
             },
         );
         self
@@ -1350,7 +1391,16 @@ fn sustenta<E: AmbienteGit + ?Sized>(
             let agora = amb.agora_unix()?;
             Ok(agora.saturating_sub(mais_novo) > dias.saturating_mul(86_400))
         }
-        Predicado::Externo { verificador } => Ok(amb.executa_em(*verificador, orc)?.codigo != 0),
+        Predicado::Externo { verificador } => {
+            let e = amb.executa_em(*verificador, orc)?;
+            if e.codigo == 0 {
+                return Ok(false);
+            }
+            match verificador.nao_verificavel(&e.erro) {
+                Some(porque) => Err(JoeiraError::NaoVerificavel(porque)),
+                None => Ok(true),
+            }
+        }
         Predicado::Todos(ps) => {
             for p in ps {
                 if !sustenta(p, amb, orc)? {

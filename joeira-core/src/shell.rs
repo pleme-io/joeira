@@ -135,7 +135,7 @@ pub fn corre_com_orcamento(
     let mut filho = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -148,6 +148,14 @@ pub fn corre_com_orcamento(
     let leitor = std::thread::spawn(move || {
         let mut b = Vec::new();
         if let Some(s) = saida.as_mut() {
+            let _ = s.read_to_end(&mut b);
+        }
+        b
+    });
+    let mut erro = filho.stderr.take();
+    let leitor_erro = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        if let Some(s) = erro.as_mut() {
             let _ = s.read_to_end(&mut b);
         }
         b
@@ -171,9 +179,11 @@ pub fn corre_com_orcamento(
         std::thread::sleep(std::time::Duration::from_millis(10));
     };
     let bytes = leitor.join().unwrap_or_default();
+    let bytes_erro = leitor_erro.join().unwrap_or_default();
     Ok(Execucao {
         codigo: estado.code().unwrap_or(-1),
         saida: String::from_utf8_lossy(&bytes).into_owned(),
+        erro: String::from_utf8_lossy(&bytes_erro).into_owned(),
     })
 }
 

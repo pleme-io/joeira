@@ -834,3 +834,40 @@ fn a_range_gated_row_runs_only_when_the_push_touches_its_paths() {
     so_lock.enviados.insert("flake.lock".into());
     assert!(matches!(avalia(&r, &so_lock), Veredito::Achado { .. }));
 }
+
+#[test]
+fn a_flake_needing_ifd_is_not_checked_never_found() {
+    let r = regra_externa_lenta();
+    for erro in [
+        "       … while checking the derivation 'packages.aarch64-darwin.default'\n\n       error: path '/nix/store/p22msr62rlfbbp7rn3pqzvfg28fjr2ms-cargo-build-spec-ifd.drv' is not valid\n",
+        "error: cannot build '/nix/store/abc-x.drv^out' during evaluation because the option 'allow-import-from-derivation' is disabled\n",
+    ] {
+        let amb = AmbienteMock::default().com_execucao_erro(Verificador::NixFlakeCheck, 1, erro);
+        match avalia(&r, &amb) {
+            Veredito::Cego { porque, .. } => {
+                assert!(
+                    porque.starts_with("not checked: the flake needs import-from-derivation"),
+                    "{porque}"
+                );
+            }
+            outro => panic!("{outro:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_genuine_flake_eval_error_is_still_a_finding() {
+    let r = regra_externa_lenta();
+    for erro in [
+        "       error: attribute 'nope' missing\n",
+        "       error:\n       Failed assertions:\n       - x\n",
+        "error: path '/nix/store/abc-source/flake.nix' does not exist\n",
+        "       error: path '/nix/store/x.drv' is not valid\n       error: attribute 'nope' missing\n",
+    ] {
+        let amb = AmbienteMock::default().com_execucao_erro(Verificador::NixFlakeCheck, 1, erro);
+        assert!(
+            matches!(avalia(&r, &amb), Veredito::Achado { .. }),
+            "{erro}"
+        );
+    }
+}
