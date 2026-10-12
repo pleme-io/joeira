@@ -731,3 +731,62 @@ fn added_path_match_is_by_basename_and_new_only() {
     let editado = AmbienteMock::default().com_stage("a/b/Dockerfile", "FROM y");
     assert_eq!(avalia(&r, &editado), Veredito::Limpo);
 }
+
+#[test]
+fn needs_follow_the_active_rules() {
+    let linha = Regra::nova(
+        "l",
+        Ponto::PreCommit,
+        Predicado::LinhaAdicionadaCasa {
+            padroes: vec![Padrao::novo("l", "x").expect("compiles")],
+        },
+        Reversibilidade::Irreversivel,
+        ClasseFalsoPositivo::Prosa,
+        "m",
+        AmbienteMock::default(),
+        AmbienteMock::default(),
+    );
+    let par = Regra::nova(
+        "p",
+        Ponto::PreCommit,
+        Predicado::BlobTemParDeLinhas {
+            abre: "<".into(),
+            fecha: ">".into(),
+        },
+        Reversibilidade::Custoso,
+        ClasseFalsoPositivo::ZeroEstrutural,
+        "m",
+        AmbienteMock::default(),
+        AmbienteMock::default(),
+    );
+    let com = necessidades(&[linha, par.clone()]);
+    assert!(com.stage.todos && com.head.todos);
+    let sem = necessidades(&[par]);
+    assert!(sem.stage.todos);
+    assert!(
+        sem.head.vazio(),
+        "no rule reads HEAD without LinhaAdicionadaCasa"
+    );
+    assert!(necessidades(&[]).stage.vazio());
+}
+
+#[test]
+fn a_path_not_checked_is_skipped_by_blob_rules_never_judged() {
+    let r = Regra::nova(
+        "p",
+        Ponto::PreCommit,
+        Predicado::BlobTemParDeLinhas {
+            abre: "<<<<<<< ".into(),
+            fecha: ">>>>>>> ".into(),
+        },
+        Reversibilidade::Custoso,
+        ClasseFalsoPositivo::ZeroEstrutural,
+        "m",
+        AmbienteMock::default(),
+        AmbienteMock::default(),
+    );
+    let mut amb = AmbienteMock::default().com_stage("x.bin", "<<<<<<< a\n>>>>>>> b\n");
+    amb.nao_verificados.insert("x.bin".into(), "binary".into());
+    assert_eq!(avalia(&r, &amb), Veredito::Limpo);
+    assert_eq!(amb.nao_verificados().len(), 1);
+}

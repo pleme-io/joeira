@@ -8,6 +8,7 @@ use joeira_core::journal::{Diario, Registro, TagVeredito};
 use joeira_core::shell::{AmbienteShell, autoridade_de, raiz_de};
 use joeira_core::{
     AmbienteGit, Nivel, Ponto, Regra, Severidade, Veredito, Verificador, avalia, le_envios,
+    necessidades,
 };
 
 pub const CHAVE_DESLIGA: &str = "JOEIRA_OFF";
@@ -52,10 +53,17 @@ pub fn relata_recusas(onde: &str, r: &Resolucao) {
     }
 }
 
-fn julga_em_camadas(ponto: Ponto, regras: &[Regra], amb: &AmbienteShell, repo: &Path) {
+fn julga_em_camadas(ponto: Ponto, regras: &[Regra], amb: AmbienteShell, repo: &Path) {
     let res = em_camadas(regras, repo);
     relata_recusas(ponto.arquivo(), &res);
-    julga(ponto, &res.regras, amb, repo, Diario::padrao().as_ref());
+    let ativas: Vec<Regra> = res
+        .regras
+        .iter()
+        .filter(|r| r.ponto() == ponto)
+        .cloned()
+        .collect();
+    let amb = amb.com_necessidades(necessidades(&ativas));
+    julga(ponto, &ativas, &amb, repo, Diario::padrao().as_ref());
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -64,6 +72,7 @@ pub struct Balanco {
     pub achados: usize,
     pub cegos: usize,
     pub fora: usize,
+    pub arquivos_nao_verificados: usize,
 }
 
 pub fn desligado() -> bool {
@@ -153,6 +162,13 @@ pub fn julga<E: AmbienteGit + ?Sized>(
             }
         }
     }
+    for (caminho, motivo) in amb.nao_verificados() {
+        b.arquivos_nao_verificados += 1;
+        eprintln!(
+            "joeira {}: not checked: {caminho} {motivo}",
+            ponto.arquivo()
+        );
+    }
     eprintln!(
         "joeira {}: {} rules, {} findings, {} not checked, {} not applicable — advisory (P1), exit 0",
         ponto.arquivo(),
@@ -168,7 +184,7 @@ pub fn pre_commit(regras: &[Regra]) {
     protegido(Ponto::PreCommit, || {
         let repo = raiz()?;
         let amb = AmbienteShell::novo(&repo);
-        julga_em_camadas(Ponto::PreCommit, regras, &amb, &repo);
+        julga_em_camadas(Ponto::PreCommit, regras, amb, &repo);
         Ok(())
     });
 }
@@ -186,7 +202,7 @@ pub fn commit_msg(regras: &[Regra], arquivo: &Path) {
         }
         let repo = raiz()?;
         let amb = AmbienteShell::novo(&repo).com_mensagem(&msg);
-        julga_em_camadas(Ponto::CommitMsg, regras, &amb, &repo);
+        julga_em_camadas(Ponto::CommitMsg, regras, amb, &repo);
         Ok(())
     });
 }
@@ -207,7 +223,7 @@ pub fn pre_push(regras: &[Regra], remoto: &str, url: &str) {
         }
         let repo = raiz()?;
         let amb = AmbienteShell::novo(&repo).com_envios(vivos);
-        julga_em_camadas(Ponto::PrePush, regras, &amb, &repo);
+        julga_em_camadas(Ponto::PrePush, regras, amb, &repo);
         Ok(())
     });
 }
@@ -269,6 +285,9 @@ pub fn explain(regras: &[Regra], staged: bool) -> anyhow::Result<()> {
             Veredito::Cego { porque, .. } => ("BLIND", porque),
         };
         println!("  {marca}  {cabeca}\n         {detalhe}\n         {porque}");
+    }
+    for (caminho, motivo) in amb.nao_verificados() {
+        println!("  not checked: {caminho} {motivo}");
     }
     Ok(())
 }
@@ -384,7 +403,8 @@ mod tests {
                 regras: 1,
                 achados: 1,
                 cegos: 0,
-                fora: 0
+                fora: 0,
+                arquivos_nao_verificados: 0
             }
         );
         let b = julga(Ponto::PreCommit, &[r], &amb, Path::new("/x"), None);

@@ -87,3 +87,17 @@ fn a_granted_edge_subtracts_and_an_ungranted_one_is_refused_by_name() {
     assert!(out.contains("subtracted by layer borda"), "{out}");
     assert!(!out.contains("REFUSED"), "{out}");
 }
+
+#[test]
+fn a_too_large_or_binary_file_is_named_not_checked() {
+    let r = Repo::novo("limite");
+    r.commit("README.md", "x\n", "seed: readme");
+    r.escreve("big.txt", &"y".repeat(2 * 1024 * 1024));
+    std::fs::write(r.dir.join("blob.bin"), b"a\0b\n").expect("w");
+    r.git(&["add", "big.txt", "blob.bin"]);
+    let o = r.joeira(&["pre-commit"], None);
+    let (_, err) = texto(&o);
+    assert_eq!(o.status.code(), Some(0), "{err}");
+    assert!(err.contains("not checked: big.txt too large"), "{err}");
+    assert!(err.contains("not checked: blob.bin binary"), "{err}");
+}

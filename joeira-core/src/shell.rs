@@ -64,7 +64,11 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::{AmbienteGit, Envio, Execucao, JoeiraError, Verificador};
+use crate::{AmbienteGit, Envio, Execucao, JoeiraError, Necessidades, Verificador};
+
+pub const LIMITE_BLOB: usize = 1024 * 1024;
+
+type Blob = Result<String, String>;
 
 #[derive(Debug, Clone)]
 struct EntradaIndice {
@@ -145,6 +149,8 @@ pub struct AmbienteShell {
     indice: RefCell<Option<Vec<EntradaIndice>>>,
     carregado: RefCell<bool>,
     envios: Vec<Envio>,
+    necessidades: Necessidades,
+    nao_verificados: RefCell<BTreeMap<String, String>>,
 }
 
 impl AmbienteShell {
@@ -165,7 +171,15 @@ impl AmbienteShell {
             indice: RefCell::new(None),
             carregado: RefCell::new(false),
             envios: Vec::new(),
+            necessidades: Necessidades::tudo(),
+            nao_verificados: RefCell::new(BTreeMap::new()),
         }
+    }
+
+    #[must_use]
+    pub fn com_necessidades(mut self, n: Necessidades) -> Self {
+        self.necessidades = n;
+        self
     }
 
     #[must_use]
@@ -217,26 +231,42 @@ impl AmbienteShell {
             return Ok(());
         }
         let entradas = self.entradas()?;
-        let mut pedidos: Vec<String> = Vec::with_capacity(entradas.len() * 2);
+        let n = &self.necessidades;
+        let mut pedidos: Vec<String> = Vec::new();
         for e in &entradas {
-            pedidos.push(e.sha_stage.clone());
-            if let Some(h) = &e.sha_head {
+            if n.stage.quer(&e.caminho) {
+                pedidos.push(e.sha_stage.clone());
+            }
+            if let Some(h) = &e.sha_head
+                && n.head.quer(&e.caminho)
+            {
                 pedidos.push(h.clone());
             }
         }
         let blobs = self.cat_file(&pedidos)?;
         let mut stage = self.stage.borrow_mut();
         let mut head = self.head.borrow_mut();
+        let mut fora = self.nao_verificados.borrow_mut();
         for e in &entradas {
-            if let Some(b) = blobs.get(&e.sha_stage) {
-                stage.insert(e.caminho.clone(), b.clone());
+            match blobs.get(&e.sha_stage) {
+                Some(Ok(b)) => {
+                    stage.insert(e.caminho.clone(), b.clone());
+                }
+                Some(Err(m)) => {
+                    fora.insert(e.caminho.clone(), m.clone());
+                }
+                None => {}
             }
             match &e.sha_head {
-                Some(h) => {
-                    if let Some(b) = blobs.get(h) {
+                Some(h) => match blobs.get(h) {
+                    Some(Ok(b)) => {
                         head.insert(e.caminho.clone(), Some(b.clone()));
                     }
-                }
+                    Some(Err(m)) => {
+                        fora.entry(e.caminho.clone()).or_insert_with(|| m.clone());
+                    }
+                    None => {}
+                },
                 None => {
                     head.insert(e.caminho.clone(), None);
                 }
@@ -246,7 +276,7 @@ impl AmbienteShell {
         Ok(())
     }
 
-    fn cat_file(&self, shas: &[String]) -> Result<BTreeMap<String, String>, JoeiraError> {
+    fn cat_file(&self, shas: &[String]) -> Result<BTreeMap<String, Blob>, JoeiraError> {
         let mut blobs = BTreeMap::new();
         if shas.is_empty() {
             return Ok(blobs);
@@ -298,7 +328,14 @@ impl AmbienteShell {
             };
             let n: usize = tamanho.parse().map_err(|_| cego(&cabeca))?;
             let corpo = saida.get(i..i + n).ok_or_else(|| cego(&"truncated body"))?;
-            blobs.insert(sha.to_owned(), String::from_utf8_lossy(corpo).into_owned());
+            let blob = if n > LIMITE_BLOB {
+                Err(format!("too large ({n} bytes > {LIMITE_BLOB})"))
+            } else if corpo[..corpo.len().min(8000)].contains(&0) {
+                Err("binary".to_owned())
+            } else {
+                Ok(String::from_utf8_lossy(corpo).into_owned())
+            };
+            blobs.insert(sha.to_owned(), blob);
             i += n + 1;
         }
         Ok(blobs)
@@ -404,6 +441,11 @@ impl AmbienteGit for AmbienteShell {
 
     fn blob_em_stage(&self, caminho: &str) -> Result<String, JoeiraError> {
         self.carrega()?;
+        if let Some(m) = self.nao_verificado(caminho) {
+            return Err(JoeiraError::AmbienteCego(format!(
+                "not checked: {caminho} {m}"
+            )));
+        }
         if let Some(hit) = self.stage.borrow().get(caminho) {
             return Ok(hit.clone());
         }
@@ -464,6 +506,21 @@ impl AmbienteGit for AmbienteShell {
 
     fn envios(&self) -> Result<Vec<Envio>, JoeiraError> {
         Ok(self.envios.clone())
+    }
+
+    fn nao_verificado(&self, caminho: &str) -> Option<String> {
+        if self.carrega().is_err() {
+            return None;
+        }
+        self.nao_verificados.borrow().get(caminho).cloned()
+    }
+
+    fn nao_verificados(&self) -> Vec<(String, String)> {
+        self.nao_verificados
+            .borrow()
+            .iter()
+            .map(|(a, b)| (a.clone(), b.clone()))
+            .collect()
     }
 
     fn executa(&self, v: Verificador) -> Result<Execucao, JoeiraError> {
@@ -691,6 +748,68 @@ mod tests {
         let principal = repo.canonicalize().expect("canon");
         assert_eq!(autoridade_de(&repo).expect("main"), principal);
         assert_eq!(autoridade_de(&arvore).expect("worktree"), principal);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn only_the_sides_the_rules_need_are_loaded() {
+        let base = std::env::temp_dir().join(format!("joeira-preguica-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("mkdir");
+        git_em(&base, &["init", "-q"]);
+        std::fs::write(base.join("a.txt"), "old a\n").expect("w");
+        std::fs::write(base.join("b.sh"), "old\n").expect("w");
+        git_em(&base, &["add", "."]);
+        git_em(
+            &base,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--no-verify",
+                "-m",
+                "c",
+            ],
+        );
+        std::fs::write(base.join("a.txt"), "new\n").expect("w");
+        std::fs::write(base.join("b.sh"), "new\n").expect("w");
+        git_em(&base, &["add", "."]);
+        let mut n = Necessidades::default();
+        n.stage.todos = true;
+        n.head.sufixos.insert(".sh".into());
+        let amb = AmbienteShell::novo(&base).com_necessidades(n);
+        assert_eq!(amb.blob_em_stage("a.txt").expect("staged"), "new\n");
+        assert!(
+            amb.head.borrow().get("a.txt").is_none(),
+            "HEAD side of a.txt was not asked for"
+        );
+        assert_eq!(
+            amb.head.borrow().get("b.sh").cloned(),
+            Some(Some("old\n".to_owned()))
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn large_and_binary_blobs_are_reported_not_read() {
+        let base = std::env::temp_dir().join(format!("joeira-limite-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("mkdir");
+        git_em(&base, &["init", "-q"]);
+        std::fs::write(base.join("big.txt"), "x".repeat(LIMITE_BLOB + 1)).expect("w");
+        std::fs::write(base.join("bin.dat"), b"<<<<<<< a\n\0>>>>>>> b\n").expect("w");
+        std::fs::write(base.join("ok.txt"), "fine\n").expect("w");
+        git_em(&base, &["add", "."]);
+        let amb = AmbienteShell::novo(&base);
+        assert_eq!(amb.blob_em_stage("ok.txt").expect("read"), "fine\n");
+        let fora = amb.nao_verificados();
+        assert_eq!(fora.len(), 2, "{fora:?}");
+        assert!(fora[0].0 == "big.txt" && fora[0].1.starts_with("too large"));
+        assert!(fora[1].0 == "bin.dat" && fora[1].1 == "binary");
+        assert!(amb.blob_em_stage("big.txt").is_err());
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -627,6 +627,12 @@ pub trait AmbienteGit {
     fn agora_unix(&self) -> Result<u64, JoeiraError>;
     fn envios(&self) -> Result<Vec<Envio>, JoeiraError>;
     fn executa(&self, v: Verificador) -> Result<Execucao, JoeiraError>;
+    fn nao_verificado(&self, _caminho: &str) -> Option<String> {
+        None
+    }
+    fn nao_verificados(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
 }
 
 /// A fully in-memory environment. The engine's test seam.
@@ -647,6 +653,7 @@ pub struct AmbienteMock {
     pub agora: u64,
     pub envios: Vec<Envio>,
     pub execucoes: BTreeMap<Verificador, Execucao>,
+    pub nao_verificados: BTreeMap<String, String>,
 }
 
 impl AmbienteMock {
@@ -791,6 +798,17 @@ impl AmbienteGit for AmbienteMock {
             .get(&v)
             .cloned()
             .ok_or_else(|| JoeiraError::FerramentaAusente(v.programa().to_owned()))
+    }
+
+    fn nao_verificado(&self, caminho: &str) -> Option<String> {
+        self.nao_verificados.get(caminho).cloned()
+    }
+
+    fn nao_verificados(&self) -> Vec<(String, String)> {
+        self.nao_verificados
+            .iter()
+            .map(|(a, b)| (a.clone(), b.clone()))
+            .collect()
     }
 }
 
@@ -1016,6 +1034,12 @@ impl<E: AmbienteGit + ?Sized> AmbienteGit for Isento<'_, E> {
     fn executa(&self, v: Verificador) -> Result<Execucao, JoeiraError> {
         self.amb.executa(v)
     }
+    fn nao_verificado(&self, caminho: &str) -> Option<String> {
+        self.amb.nao_verificado(caminho)
+    }
+    fn nao_verificados(&self) -> Vec<(String, String)> {
+        self.amb.nao_verificados()
+    }
 }
 
 /// Evaluate one rule against one environment.
@@ -1120,6 +1144,9 @@ fn sustenta<E: AmbienteGit + ?Sized>(p: &Predicado, amb: &E) -> Result<bool, Joe
         }
         Predicado::LinhaAdicionadaCasa { padroes } => {
             for caminho in amb.caminhos_em_stage()? {
+                if amb.nao_verificado(&caminho).is_some() {
+                    continue;
+                }
                 let adicionadas = linhas_adicionadas(amb, &caminho)?;
                 let alvo = adicionadas.join("\n");
                 if !adicionadas.is_empty() && padroes.iter().any(|pd| pd.casa(&alvo)) {
@@ -1130,6 +1157,9 @@ fn sustenta<E: AmbienteGit + ?Sized>(p: &Predicado, amb: &E) -> Result<bool, Joe
         }
         Predicado::BlobTemParDeLinhas { abre, fecha } => {
             for caminho in amb.caminhos_em_stage()? {
+                if amb.nao_verificado(&caminho).is_some() {
+                    continue;
+                }
                 let blob = amb.blob_em_stage(&caminho)?;
                 let tem_abre = blob.lines().any(|l| l.starts_with(abre.as_str()));
                 let tem_fecha = blob.lines().any(|l| l.starts_with(fecha.as_str()));
@@ -1178,7 +1208,7 @@ fn sustenta<E: AmbienteGit + ?Sized>(p: &Predicado, amb: &E) -> Result<bool, Joe
             linhas_cola,
         } => {
             for caminho in amb.caminhos_em_stage()? {
-                if !caminho.ends_with(sufixo.as_str()) {
+                if !caminho.ends_with(sufixo.as_str()) || amb.nao_verificado(&caminho).is_some() {
                     continue;
                 }
                 let agora = conta_linhas(&amb.blob_em_stage(&caminho)?);
@@ -1217,6 +1247,92 @@ fn sustenta<E: AmbienteGit + ?Sized>(p: &Predicado, amb: &E) -> Result<bool, Joe
             Ok(false)
         }
         Predicado::Nao(p) => Ok(!sustenta(p, amb)?),
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Filtro {
+    pub todos: bool,
+    pub caminhos: std::collections::BTreeSet<String>,
+    pub sufixos: std::collections::BTreeSet<String>,
+}
+
+impl Filtro {
+    #[must_use]
+    pub fn quer(&self, caminho: &str) -> bool {
+        self.todos
+            || self.caminhos.contains(caminho)
+            || self.sufixos.iter().any(|s| caminho.ends_with(s.as_str()))
+    }
+
+    #[must_use]
+    pub fn vazio(&self) -> bool {
+        !self.todos && self.caminhos.is_empty() && self.sufixos.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Necessidades {
+    pub stage: Filtro,
+    pub head: Filtro,
+}
+
+impl Necessidades {
+    #[must_use]
+    pub fn tudo() -> Self {
+        let todos = Filtro {
+            todos: true,
+            ..Filtro::default()
+        };
+        Self {
+            stage: todos.clone(),
+            head: todos,
+        }
+    }
+}
+
+#[must_use]
+pub fn necessidades(regras: &[Regra]) -> Necessidades {
+    let mut n = Necessidades::default();
+    for r in regras {
+        acumula(&r.predicado, &mut n);
+    }
+    n
+}
+
+fn acumula(p: &Predicado, n: &mut Necessidades) {
+    match p {
+        Predicado::LinhaAdicionadaCasa { .. } => {
+            n.stage.todos = true;
+            n.head.todos = true;
+        }
+        Predicado::BlobTemParDeLinhas { .. } => n.stage.todos = true,
+        Predicado::AmarraDeHash {
+            arquivo, sidecar, ..
+        } => {
+            n.stage.caminhos.insert(arquivo.clone());
+            n.stage.caminhos.insert(sidecar.clone());
+        }
+        Predicado::ScriptAlemDaCola { sufixo, .. } => {
+            n.stage.sufixos.insert(sufixo.clone());
+            n.head.sufixos.insert(sufixo.clone());
+        }
+        Predicado::LockMaisVelhoQue { arquivo, .. } => {
+            n.head.caminhos.insert(arquivo.clone());
+        }
+        Predicado::Todos(ps) | Predicado::Algum(ps) => {
+            for q in ps {
+                acumula(q, n);
+            }
+        }
+        Predicado::Nao(q) => acumula(q, n),
+        Predicado::AssuntoNaLista { .. }
+        | Predicado::AssuntoCaudaNaLista { .. }
+        | Predicado::MensagemTemTrailer { .. }
+        | Predicado::Rastreado { .. }
+        | Predicado::CaminhoEmStageSob { .. }
+        | Predicado::CaminhoAdicionadoCasa { .. }
+        | Predicado::Externo { .. } => {}
     }
 }
 
