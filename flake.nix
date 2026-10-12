@@ -15,6 +15,19 @@
     };
   };
   outputs = inputs @ { self, nixpkgs, crate2nix, flake-utils, substrate, ... }:
+    let
+      inherit (nixpkgs.lib) mkOption types;
+      severity = types.enum [ "advise" "warn-with-ratchet" "warn" "block" ];
+      floors = description: mkOption {
+        type = types.attrsOf severity;
+        default = { };
+        inherit description;
+      };
+      layer = nivel: pisos: builtins.toJSON { inherit nivel pisos; };
+      systemLayer = { cfg, ... }: {
+        environment.etc."joeira/sistema.json".text = layer "sistema" cfg.rules;
+      };
+    in
     (import "${substrate}/lib/rust-workspace-release-flake.nix" {
       inherit nixpkgs crate2nix flake-utils;
     }) {
@@ -22,5 +35,25 @@
       packageName = "joeira";
       src = self;
       repo = "pleme-io/joeira";
+      module = {
+        description = "joeira, the typed git-hook control plane";
+        hmNamespace = "blackmatter.components";
+        extraSystemOptions = {
+          rules = floors "System-level rules and their floors (fleet rules, floors no lower layer relaxes), rendered to /etc/joeira/sistema.json.";
+        };
+        extraNixosConfigFn = systemLayer;
+        extraDarwinConfigFn = systemLayer;
+        extraHmOptions = {
+          rules = floors "User-level rules and their floors, rendered to ~/.config/joeira/usuario.json.";
+          repoEdge.enable = mkOption {
+            type = types.bool;
+            default = false;
+            description = "Read the repository's (defjoeira-borda ...) edge layer. Inert: joeira has no edge discovery yet (JOEIRA.md P2), so this option renders nothing.";
+          };
+        };
+        extraHmConfigFn = { cfg, ... }: {
+          xdg.configFile."joeira/usuario.json".text = layer "usuario" cfg.rules;
+        };
+      };
     };
 }
