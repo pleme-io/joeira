@@ -59,6 +59,13 @@ enum Comando {
     },
     /// The corpus, the kill switch, the tools on PATH and the journal.
     Status,
+    /// Judge every commit in <base>..<head> with the layered rules. Exit 1 only
+    /// when a rule at effective severity bloqueia fires; exit 2 when the range
+    /// cannot be read. The P1 advisory clamp does not apply here.
+    Ci {
+        #[arg(long)]
+        range: String,
+    },
     /// Differential against the DEPLOYED incumbent hooks over real history.
     ///
     /// Exits non-zero on an un-triaged disagreement, on an empty denominator,
@@ -90,6 +97,13 @@ fn main() -> anyhow::Result<()> {
             gancho_com_corpus(|r| gancho::pre_push(r, &remoto, &url))
         }
         Comando::Explain { staged } => gancho::explain(&corpus()?, staged),
+        Comando::Ci { range } => match corpus() {
+            Ok(regras) => std::process::exit(gancho::ci(&regras, &range)),
+            Err(e) => {
+                eprintln!("joeira ci: the corpus did not build: {e:#} (exit 2)");
+                std::process::exit(2)
+            }
+        },
         Comando::Status => {
             gancho::status(&corpus()?);
             Ok(())

@@ -292,6 +292,112 @@ pub fn explain(regras: &[Regra], staged: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct BalancoCi {
+    pub commits: usize,
+    pub achados: usize,
+    pub bloqueios: usize,
+    pub cegos: usize,
+}
+
+pub fn julga_commit<E: AmbienteGit + ?Sized>(
+    id: &str,
+    regras: &[Regra],
+    amb: &E,
+    b: &mut BalancoCi,
+) {
+    b.commits += 1;
+    for r in regras
+        .iter()
+        .filter(|r| matches!(r.ponto(), Ponto::PreCommit | Ponto::CommitMsg))
+    {
+        match avalia(r, amb) {
+            Veredito::Achado {
+                regra,
+                severidade,
+                mensagem,
+            } => {
+                b.achados += 1;
+                let bloqueia = severidade.gateia();
+                if bloqueia {
+                    b.bloqueios += 1;
+                }
+                eprintln!(
+                    "joeira ci {id}: {} {regra} [{}]: {mensagem}",
+                    if bloqueia { "BLOCK" } else { "WARN" },
+                    severidade.simbolo()
+                );
+            }
+            Veredito::Cego { regra, porque } => {
+                b.cegos += 1;
+                eprintln!("joeira ci {id}: NOT CHECKED {regra}: {porque}");
+            }
+            Veredito::Limpo | Veredito::NaoSeAplica { .. } => {}
+        }
+    }
+    for (caminho, motivo) in amb.nao_verificados() {
+        eprintln!("joeira ci {id}: not checked: {caminho} {motivo}");
+    }
+}
+
+pub fn ci(regras: &[Regra], faixa: &str) -> i32 {
+    match ci_em(regras, faixa) {
+        Ok(b) => {
+            eprintln!(
+                "joeira ci {faixa}: {} commits, {} findings, {} blocking, {} not checked — exit {}",
+                b.commits,
+                b.achados,
+                b.bloqueios,
+                b.cegos,
+                i32::from(b.bloqueios > 0)
+            );
+            i32::from(b.bloqueios > 0)
+        }
+        Err(e) => {
+            eprintln!("joeira ci: cannot judge range {faixa}: {e:#} (exit 2)");
+            2
+        }
+    }
+}
+
+fn ci_em(regras: &[Regra], faixa: &str) -> anyhow::Result<BalancoCi> {
+    anyhow::ensure!(
+        faixa.contains("..") && !faixa.contains("..."),
+        "expected <base>..<head>"
+    );
+    let repo = raiz()?;
+    let out = std::process::Command::new("git")
+        .args(["rev-list", "--reverse", faixa, "--"])
+        .current_dir(&repo)
+        .output()?;
+    anyhow::ensure!(
+        out.status.success(),
+        "`git rev-list {faixa}` exited {}: {}",
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    let shas: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let res = em_camadas(regras, &repo);
+    relata_recusas("ci", &res);
+    let ativas: Vec<Regra> = res
+        .regras
+        .into_iter()
+        .filter(|r| matches!(r.ponto(), Ponto::PreCommit | Ponto::CommitMsg))
+        .collect();
+    let n = necessidades(&ativas);
+    let mut b = BalancoCi::default();
+    for sha in &shas {
+        let amb = AmbienteShell::novo(&repo)
+            .no_commit(sha)?
+            .com_necessidades(n.clone());
+        julga_commit(&sha[..sha.len().min(12)], &ativas, &amb, &mut b);
+    }
+    Ok(b)
+}
+
 pub fn no_path(programa: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
@@ -409,6 +515,46 @@ mod tests {
         );
         let b = julga(Ponto::PreCommit, &[r], &amb, Path::new("/x"), None);
         assert_eq!(b.regras, 0);
+    }
+
+    fn regra_estrutural() -> Regra {
+        Regra::nova(
+            "estrutural",
+            Ponto::PreCommit,
+            Predicado::CaminhoEmStageSob {
+                prefixo: "x/".into(),
+            },
+            Reversibilidade::Custoso,
+            ClasseFalsoPositivo::ZeroEstrutural,
+            "m",
+            AmbienteMock::default(),
+            AmbienteMock::default(),
+        )
+    }
+
+    #[test]
+    fn ci_blocks_only_when_a_layer_raised_the_floor_to_bloqueia() {
+        let amb = AmbienteMock::default().com_stage("x/a", "a");
+        let mut b = BalancoCi::default();
+        julga_commit("c", &[regra_estrutural()], &amb, &mut b);
+        assert_eq!((b.achados, b.bloqueios), (1, 0));
+
+        let mut a = joeira_core::camadas::ArquivoDeCamada {
+            nivel: Nivel::Sistema,
+            pisos: Default::default(),
+            concessoes: Default::default(),
+        };
+        a.pisos.insert("estrutural".into(), Severidade::Bloqueia);
+        let res = resolve(
+            vec![regra_estrutural()],
+            &Fontes {
+                sistema: Some(("/etc/s".into(), Ok(a))),
+                ..Fontes::default()
+            },
+        );
+        let mut b = BalancoCi::default();
+        julga_commit("c", &res.regras, &amb, &mut b);
+        assert_eq!((b.achados, b.bloqueios), (1, 1));
     }
 
     #[test]

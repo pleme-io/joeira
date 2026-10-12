@@ -151,6 +151,14 @@ pub struct AmbienteShell {
     envios: Vec<Envio>,
     necessidades: Necessidades,
     nao_verificados: RefCell<BTreeMap<String, String>>,
+    commit: Option<Commit>,
+}
+
+#[derive(Debug, Clone)]
+struct Commit {
+    sha: String,
+    pai: String,
+    tem_pai: bool,
 }
 
 impl AmbienteShell {
@@ -173,7 +181,27 @@ impl AmbienteShell {
             envios: Vec::new(),
             necessidades: Necessidades::tudo(),
             nao_verificados: RefCell::new(BTreeMap::new()),
+            commit: None,
         }
+    }
+
+    pub fn no_commit(mut self, sha: &str) -> Result<Self, JoeiraError> {
+        let pai = self.git_opcional(&["rev-parse", "--verify", "-q", &format!("{sha}^1")])?;
+        let (pai, tem_pai) = match pai {
+            Some(p) => (p.trim().to_owned(), true),
+            None => (
+                self.git(&["hash-object", "-t", "tree", "--stdin"])?
+                    .trim()
+                    .to_owned(),
+                false,
+            ),
+        };
+        self.commit = Some(Commit {
+            sha: sha.to_owned(),
+            pai,
+            tem_pai,
+        });
+        Ok(self)
     }
 
     #[must_use]
@@ -192,15 +220,28 @@ impl AmbienteShell {
         if let Some(e) = self.indice.borrow().as_ref() {
             return Ok(e.clone());
         }
-        let out = self.git(&[
-            "diff",
-            "--cached",
-            "--raw",
-            "-z",
-            "--no-renames",
-            "--no-abbrev",
-            "--diff-filter=ACM",
-        ])?;
+        let out = match &self.commit {
+            None => self.git(&[
+                "diff",
+                "--cached",
+                "--raw",
+                "-z",
+                "--no-renames",
+                "--no-abbrev",
+                "--diff-filter=ACM",
+            ])?,
+            Some(c) => self.git(&[
+                "diff-tree",
+                "-r",
+                "--raw",
+                "-z",
+                "--no-renames",
+                "--no-abbrev",
+                "--diff-filter=ACM",
+                &c.pai,
+                &c.sha,
+            ])?,
+        };
         let mut entradas = Vec::new();
         let mut partes = out.split('\0').filter(|p| !p.is_empty());
         while let Some(meta) = partes.next() {
@@ -427,6 +468,9 @@ impl AmbienteGit for AmbienteShell {
         if let Some(m) = &self.mensagem_forcada {
             return Ok(m.clone());
         }
+        if let Some(c) = &self.commit {
+            return self.git(&["log", "-1", "--format=%B", &c.sha]);
+        }
         self.git(&["log", "-1", "--format=%B", "HEAD"])
     }
 
@@ -452,7 +496,11 @@ impl AmbienteGit for AmbienteShell {
         // A staged path that cannot be shown is a genuine failure to look: the
         // path came from `--diff-filter=ACMR`, so it exists in the index by
         // construction. Unlike the HEAD read, there is no legitimate absent case.
-        let blob = self.git(&["show", &format!(":{caminho}")])?;
+        let alvo = self
+            .commit
+            .as_ref()
+            .map_or_else(|| format!(":{caminho}"), |c| format!("{}:{caminho}", c.sha));
+        let blob = self.git(&["show", &alvo])?;
         self.stage
             .borrow_mut()
             .insert(caminho.to_owned(), blob.clone());
@@ -464,7 +512,11 @@ impl AmbienteGit for AmbienteShell {
         if let Some(hit) = self.head.borrow().get(caminho) {
             return Ok(hit.clone());
         }
-        let blob = self.git_opcional(&["show", &format!("HEAD:{caminho}")])?;
+        let blob = match &self.commit {
+            Some(c) if !c.tem_pai => None,
+            Some(c) => self.git_opcional(&["show", &format!("{}:{caminho}", c.pai)])?,
+            None => self.git_opcional(&["show", &format!("HEAD:{caminho}")])?,
+        };
         self.head
             .borrow_mut()
             .insert(caminho.to_owned(), blob.clone());
@@ -488,10 +540,17 @@ impl AmbienteGit for AmbienteShell {
     }
 
     fn existe(&self, caminho: &str) -> Result<bool, JoeiraError> {
+        if let Some(c) = &self.commit {
+            let alvo = format!("{}:{}", c.sha, caminho.trim_end_matches('/'));
+            return Ok(self.git_opcional(&["cat-file", "-e", &alvo])?.is_some());
+        }
         Ok(self.repo.join(caminho).exists())
     }
 
     fn rastreado(&self, caminho: &str) -> Result<bool, JoeiraError> {
+        if self.commit.is_some() {
+            return self.existe(caminho);
+        }
         Ok(self
             .git_opcional(&["ls-files", "--error-unmatch", "--", caminho])?
             .is_some())
@@ -524,6 +583,13 @@ impl AmbienteGit for AmbienteShell {
     }
 
     fn executa(&self, v: Verificador) -> Result<Execucao, JoeiraError> {
+        if let Some(c) = &self.commit {
+            return Err(JoeiraError::AmbienteCego(format!(
+                "`{}` runs on a worktree, not on commit {}; not judged per commit",
+                v.linha(),
+                c.sha
+            )));
+        }
         let out = Command::new(v.programa())
             .args(v.argumentos())
             .current_dir(&self.repo)
@@ -790,6 +856,62 @@ mod tests {
             amb.head.borrow().get("b.sh").cloned(),
             Some(Some("old\n".to_owned()))
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_commit_is_read_as_its_tree_against_its_parent() {
+        let base = std::env::temp_dir().join(format!("joeira-commit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("mkdir");
+        git_em(&base, &["init", "-q"]);
+        let c = |m: &str| {
+            git_em(&base, &["add", "."]);
+            git_em(
+                &base,
+                &[
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "commit",
+                    "-q",
+                    "--no-verify",
+                    "-m",
+                    m,
+                ],
+            );
+            let o = Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&base)
+                .output()
+                .expect("git");
+            String::from_utf8_lossy(&o.stdout).trim().to_owned()
+        };
+        std::fs::write(base.join("a.txt"), "one\n").expect("w");
+        let raiz = c("root subject");
+        std::fs::write(base.join("a.txt"), "two\n").expect("w");
+        std::fs::write(base.join("b.txt"), "new\n").expect("w");
+        let segundo = c("second subject");
+        let r = AmbienteShell::novo(&base).no_commit(&raiz).expect("root");
+        assert_eq!(r.caminhos_em_stage().expect("paths"), vec!["a.txt"]);
+        assert_eq!(r.blob_em_head("a.txt").expect("head"), None);
+        assert_eq!(r.mensagem().expect("msg").trim(), "root subject");
+        let s = AmbienteShell::novo(&base)
+            .no_commit(&segundo)
+            .expect("second");
+        assert_eq!(
+            s.caminhos_em_stage().expect("paths"),
+            vec!["a.txt", "b.txt"]
+        );
+        assert_eq!(s.blob_em_stage("a.txt").expect("tree"), "two\n");
+        assert_eq!(
+            s.blob_em_head("a.txt").expect("parent"),
+            Some("one\n".to_owned())
+        );
+        assert_eq!(s.caminhos_adicionados().expect("added"), vec!["b.txt"]);
+        assert!(s.existe("b.txt").expect("exists"));
+        assert!(!r.existe("b.txt").expect("absent in root"));
         let _ = std::fs::remove_dir_all(&base);
     }
 
