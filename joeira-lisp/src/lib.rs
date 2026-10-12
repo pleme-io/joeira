@@ -10,7 +10,7 @@
 //! `pending-joeira: tatara-domain-border` — the derive lands with `joeira-core`
 //! M1, alongside the `defjoeira-ponto` catalog.
 
-use joeira_core::{ClasseFalsoPositivo, Ponto, Reversibilidade};
+use joeira_core::{ClasseFalsoPositivo, Nivel, Ponto, Reversibilidade};
 
 /// The fleet catalog, compiled in.
 ///
@@ -77,6 +77,8 @@ pub const CHAVES: &[&str] = &[
     ":reversibilidade",
     ":fp",
     ":lista",
+    ":nivel",
+    ":gatilho",
 ];
 
 /// A read form, before it becomes a `joeira_core::Regra`.
@@ -97,6 +99,8 @@ pub struct FormaLida {
     /// every consumer, and two spellings of one state is the shape this repo
     /// exists to remove.
     pub lista: Vec<String>,
+    pub nivel: Option<Nivel>,
+    pub gatilho: Option<String>,
 }
 
 /// Resolve a `:ponto` symbol. Closed over `Ponto`, so an unknown mount point is
@@ -153,6 +157,23 @@ fn fp_de(regra: &str, s: &str) -> Result<ClasseFalsoPositivo, ErroDeLeitura> {
             conhecidas: ClasseFalsoPositivo::todos()
                 .iter()
                 .map(|c| c.simbolo())
+                .collect::<Vec<_>>()
+                .join(", "),
+        })
+}
+
+fn nivel_de(regra: &str, s: &str) -> Result<Nivel, ErroDeLeitura> {
+    Nivel::todos()
+        .iter()
+        .copied()
+        .find(|n| n.simbolo() == s)
+        .ok_or_else(|| ErroDeLeitura::SimboloDesconhecido {
+            regra: regra.to_owned(),
+            chave: ":nivel".to_owned(),
+            achado: s.to_owned(),
+            conhecidas: Nivel::todos()
+                .iter()
+                .map(|n| n.simbolo())
                 .collect::<Vec<_>>()
                 .join(", "),
         })
@@ -229,6 +250,8 @@ where
     let mut reversibilidade = None;
     let mut fp = None;
     let mut lista = Vec::new();
+    let mut nivel = None;
+    let mut gatilho = None;
 
     while let Some(t) = it.next() {
         if t == ")" {
@@ -268,6 +291,8 @@ where
             ":mensagem" => mensagem = Some(valor),
             ":reversibilidade" => reversibilidade = Some(reversibilidade_de(&rotulo, &valor)?),
             ":fp" => fp = Some(fp_de(&rotulo, &valor)?),
+            ":nivel" => nivel = Some(nivel_de(&rotulo, &valor)?),
+            ":gatilho" => gatilho = Some(valor),
             outra => {
                 return Err(ErroDeLeitura::ChaveDesconhecida {
                     regra: rotulo,
@@ -298,6 +323,8 @@ where
         reversibilidade,
         fp,
         lista,
+        nivel,
+        gatilho,
     })
 }
 
@@ -376,7 +403,11 @@ mod tests {
     #[test]
     fn the_fleet_catalog_parses() {
         let formas = ler_catalogo(CATALOGO).expect("the compiled-in catalog must parse");
-        assert_eq!(formas.len(), 5, "five concerns");
+        assert_eq!(
+            formas.len(),
+            17,
+            "five incumbent concerns and twelve placement rows"
+        );
         let nomes: Vec<&str> = formas.iter().map(|f| f.nome.as_str()).collect();
         assert_eq!(
             nomes,
@@ -386,6 +417,18 @@ mod tests {
                 "gen-lock-tie",
                 "sec-plaintext-credential",
                 "msg-ai-attribution-trailer",
+                "nix-flake-untracked",
+                "nix-flake-check",
+                "nix-flake-lock-age",
+                "rust-cargo-metadata",
+                "rust-cargo-fetch-locked",
+                "rust-cargo-fmt",
+                "blue-bluefile-confirm",
+                "go-mod-tidy",
+                "go-vet",
+                "ci-actionlint",
+                "shell-dockerfile-new",
+                "shell-script-beyond-glue",
             ],
             "source order is preserved"
         );
@@ -408,6 +451,33 @@ mod tests {
         for w in ["init", "wip", "refactor!", ".", "..", "hotfix"] {
             assert!(msg.lista.iter().any(|x| x == w), "{w} is in the list");
         }
+    }
+
+    #[test]
+    fn every_catalog_form_carries_a_level() {
+        for f in ler_catalogo(CATALOGO).expect("parses") {
+            assert!(f.nivel.is_some(), "{}: :nivel", f.nome);
+        }
+    }
+
+    #[test]
+    fn an_unknown_level_is_refused() {
+        let e = ler(r#"(defjoeira :nome "x" :ponto pre-push :mensagem "m" :nivel planeta)"#)
+            .expect_err("refused");
+        assert!(
+            matches!(e, ErroDeLeitura::SimboloDesconhecido { .. }),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn level_and_trigger_are_read() {
+        let f = ler(
+            r#"(defjoeira :nome "x" :ponto pre-push :mensagem "m" :nivel classe-de-repo :gatilho "go.mod")"#,
+        )
+        .expect("reads");
+        assert_eq!(f.nivel, Some(Nivel::ClasseDeRepo));
+        assert_eq!(f.gatilho.as_deref(), Some("go.mod"));
     }
 
     #[test]
@@ -440,6 +510,18 @@ mod tests {
             // `joeira-ratchet` exists rather than being a nicety.
             ("sec-plaintext-credential", Severidade::AvisaComCatraca),
             ("msg-ai-attribution-trailer", Severidade::Avisa),
+            ("nix-flake-untracked", Severidade::Bloqueia),
+            ("nix-flake-check", Severidade::Bloqueia),
+            ("nix-flake-lock-age", Severidade::Consultivo),
+            ("rust-cargo-metadata", Severidade::Bloqueia),
+            ("rust-cargo-fetch-locked", Severidade::Bloqueia),
+            ("rust-cargo-fmt", Severidade::Avisa),
+            ("blue-bluefile-confirm", Severidade::Bloqueia),
+            ("go-mod-tidy", Severidade::Avisa),
+            ("go-vet", Severidade::Consultivo),
+            ("ci-actionlint", Severidade::Avisa),
+            ("shell-dockerfile-new", Severidade::Avisa),
+            ("shell-script-beyond-glue", Severidade::Consultivo),
         ];
         for f in ler_catalogo(CATALOGO).expect("parses") {
             let (_, quer) = esperado

@@ -42,6 +42,7 @@
 (defjoeira
   :nome "msg-placeholder-subject"
   :ponto commit-msg
+  :nivel sistema
   :reversibilidade custoso
   :fp token-exato
   :mensagem "commit subject carries no information — say what changed and why"
@@ -69,6 +70,7 @@
 (defjoeira
   :nome "vcs-conflict-markers"
   :ponto pre-commit
+  :nivel sistema
   :reversibilidade custoso
   :fp zero-estrutural
   :mensagem "staged blob contains unresolved merge-conflict markers")
@@ -80,6 +82,8 @@
 (defjoeira
   :nome "gen-lock-tie"
   :ponto pre-commit
+  :nivel sistema
+  :gatilho "Cargo.gen.lock"
   :reversibilidade custoso
   :fp zero-estrutural
   :mensagem "staged index would break the gen delta tie (D2)")
@@ -91,6 +95,7 @@
 (defjoeira
   :nome "sec-plaintext-credential"
   :ponto pre-commit
+  :nivel sistema
   :reversibilidade irreversivel
   :fp prosa
   :mensagem "staged blob may carry a plaintext credential")
@@ -106,6 +111,115 @@
 (defjoeira
   :nome "msg-ai-attribution-trailer"
   :ponto commit-msg
+  :nivel sistema
   :reversibilidade custoso
   :fp token-exato
   :mensagem "commit message carries an AI-attribution trailer")
+
+;; ── placement rows, theory/JOEIRA.md §6.1 ─────────────────────────────────
+
+(defjoeira
+  :nome "nix-flake-untracked"
+  :ponto pre-push
+  :nivel usuario
+  :gatilho "flake.nix"
+  :reversibilidade custoso
+  :fp zero-estrutural
+  :mensagem "flake.nix exists but is not tracked; a flake sees only git-tracked files")
+
+(defjoeira
+  :nome "nix-flake-check"
+  :ponto pre-push
+  :nivel usuario
+  :gatilho "flake.nix"
+  :reversibilidade custoso
+  :fp zero-estrutural
+  :mensagem "nix flake check --no-build fails; the pushed flake does not evaluate")
+
+(defjoeira
+  :nome "nix-flake-lock-age"
+  :ponto pre-push
+  :nivel usuario
+  :gatilho "flake.lock"
+  :reversibilidade recuperavel
+  :fp limiar
+  :mensagem "flake.lock: no input moved in 30 days; run nix flake update")
+
+(defjoeira
+  :nome "rust-cargo-metadata"
+  :ponto pre-push
+  :nivel classe-de-repo
+  :gatilho "Cargo.toml"
+  :reversibilidade custoso
+  :fp zero-estrutural
+  :mensagem "cargo metadata fails; the workspace manifest does not resolve")
+
+(defjoeira
+  :nome "rust-cargo-fetch-locked"
+  :ponto pre-push
+  :nivel classe-de-repo
+  :gatilho "Cargo.lock"
+  :reversibilidade custoso
+  :fp zero-estrutural
+  :mensagem "cargo fetch --locked fails; Cargo.lock is stale or pins a rev gone upstream")
+
+(defjoeira
+  :nome "rust-cargo-fmt"
+  :ponto pre-commit
+  :nivel classe-de-repo
+  :gatilho "Cargo.toml"
+  :reversibilidade recuperavel
+  :fp zero-estrutural
+  :mensagem "cargo fmt --all --check fails; run cargo fmt --all")
+
+(defjoeira
+  :nome "blue-bluefile-confirm"
+  :ponto pre-commit
+  :nivel classe-de-repo
+  :gatilho "Bluefile"
+  :reversibilidade custoso
+  :fp zero-estrutural
+  :mensagem "blue bluefile --confirm fails; Bluefile.lock is not blue's evaluation of Bluefile")
+
+(defjoeira
+  :nome "go-mod-tidy"
+  :ponto pre-push
+  :nivel classe-de-repo
+  :gatilho "go.mod"
+  :reversibilidade recuperavel
+  :fp zero-estrutural
+  :mensagem "go mod tidy -diff reports changes; run go mod tidy")
+
+(defjoeira
+  :nome "go-vet"
+  :ponto pre-push
+  :nivel classe-de-repo
+  :gatilho "go.mod"
+  :reversibilidade recuperavel
+  :fp limiar
+  :mensagem "go vet ./... reports findings")
+
+(defjoeira
+  :nome "ci-actionlint"
+  :ponto pre-commit
+  :nivel classe-de-repo
+  :gatilho ".github/workflows"
+  :reversibilidade recuperavel
+  :fp token-exato
+  :mensagem "actionlint fails on a changed workflow")
+
+(defjoeira
+  :nome "shell-dockerfile-new"
+  :ponto pre-commit
+  :nivel usuario
+  :reversibilidade recuperavel
+  :fp token-exato
+  :mensagem "a new Dockerfile is staged; images are built with Nix (Pillar 8)")
+
+(defjoeira
+  :nome "shell-script-beyond-glue"
+  :ponto pre-commit
+  :nivel usuario
+  :reversibilidade recuperavel
+  :fp limiar
+  :mensagem "a staged *.sh is new or grew past 3 lines of glue; write the typed tool instead")

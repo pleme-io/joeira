@@ -586,3 +586,148 @@ fn todos_algum_nao_compose() {
         Veredito::Achado { .. }
     ));
 }
+
+fn regra_de(p: Predicado, gatilho: Option<&str>) -> Regra {
+    Regra::nova(
+        "t",
+        Ponto::PrePush,
+        p,
+        Reversibilidade::Recuperavel,
+        ClasseFalsoPositivo::ZeroEstrutural,
+        "m",
+        AmbienteMock::default(),
+        AmbienteMock::default(),
+    )
+    .com_origem(Nivel::ClasseDeRepo, gatilho.map(str::to_owned))
+}
+
+#[test]
+fn le_envios_reads_ref_triples() {
+    let e = le_envios("refs/heads/main abc123 refs/heads/main 000000\n\n").expect("parses");
+    assert_eq!(e.len(), 1);
+    assert_eq!(e[0].ref_remota, "refs/heads/main");
+    assert!(!e[0].eh_remocao());
+}
+
+#[test]
+fn le_envios_reads_empty_input_as_no_refs() {
+    assert!(le_envios("").expect("parses").is_empty());
+}
+
+#[test]
+fn le_envios_marks_a_deletion() {
+    let e = le_envios("(delete) 0000 refs/heads/x abcd").expect("parses");
+    assert!(e[0].eh_remocao());
+}
+
+#[test]
+fn le_envios_refuses_a_short_line_and_non_hex() {
+    assert!(le_envios("refs/heads/main abc").is_err());
+    assert!(le_envios("a zz b 00").is_err());
+}
+
+#[test]
+fn externo_holds_on_nonzero_exit_and_is_blind_when_the_tool_is_absent() {
+    let r = regra_de(
+        Predicado::Externo {
+            verificador: Verificador::CargoMetadata,
+        },
+        Some("Cargo.toml"),
+    );
+    let base = AmbienteMock::default().com_arvore("Cargo.toml");
+    assert!(matches!(
+        avalia(
+            &r,
+            &base.clone().com_execucao(Verificador::CargoMetadata, 101)
+        ),
+        Veredito::Achado { .. }
+    ));
+    assert_eq!(
+        avalia(
+            &r,
+            &base.clone().com_execucao(Verificador::CargoMetadata, 0)
+        ),
+        Veredito::Limpo
+    );
+    match avalia(&r, &base) {
+        Veredito::Cego { porque, .. } => assert_eq!(porque, "not checked: cargo absent"),
+        v => panic!("{v:?}"),
+    }
+}
+
+#[test]
+fn an_absent_trigger_is_not_applicable_never_clean() {
+    let r = regra_de(
+        Predicado::Externo {
+            verificador: Verificador::GoVet,
+        },
+        Some("go.mod"),
+    );
+    assert!(matches!(
+        avalia(&r, &AmbienteMock::default()),
+        Veredito::NaoSeAplica { .. }
+    ));
+}
+
+#[test]
+fn every_verificador_is_typed_argv_with_a_program() {
+    for v in Verificador::todos() {
+        assert!(!v.programa().is_empty());
+        assert!(!v.programa().contains(' '));
+        assert!(v.argumentos().iter().all(|a| !a.contains(' ')));
+    }
+}
+
+#[test]
+fn script_glue_budget_is_diff_scoped() {
+    let r = regra_de(
+        Predicado::ScriptAlemDaCola {
+            sufixo: ".sh".into(),
+            linhas_cola: 3,
+        },
+        None,
+    );
+    let encolheu = AmbienteMock::default()
+        .com_head("a.sh", "1\n2\n3\n4\n5\n")
+        .com_stage("a.sh", "1\n2\n3\n4\n");
+    assert_eq!(avalia(&r, &encolheu), Veredito::Limpo);
+    let cresceu = AmbienteMock::default()
+        .com_head("a.sh", "1\n2\n3\n4\n")
+        .com_stage("a.sh", "1\n2\n3\n4\n5\n");
+    assert!(matches!(avalia(&r, &cresceu), Veredito::Achado { .. }));
+    let comentarios = AmbienteMock::default().com_stage("b.sh", "#!/bin/sh\n# a\n# b\nexec x\n");
+    assert_eq!(avalia(&r, &comentarios), Veredito::Limpo);
+}
+
+#[test]
+fn lock_age_skips_an_absent_or_unparseable_lock() {
+    let r = regra_de(
+        Predicado::LockMaisVelhoQue {
+            arquivo: "flake.lock".into(),
+            dias: 30,
+        },
+        None,
+    );
+    assert_eq!(
+        avalia(&r, &AmbienteMock::default().com_agora(u64::MAX)),
+        Veredito::Limpo
+    );
+    let lixo = AmbienteMock::default()
+        .com_head("flake.lock", "not json")
+        .com_agora(u64::MAX);
+    assert_eq!(avalia(&r, &lixo), Veredito::Limpo);
+}
+
+#[test]
+fn added_path_match_is_by_basename_and_new_only() {
+    let r = regra_de(
+        Predicado::CaminhoAdicionadoCasa {
+            padroes: vec![Padrao::novo("t", "^Dockerfile$").expect("compiles")],
+        },
+        None,
+    );
+    let novo = AmbienteMock::default().com_adicionado("a/b/Dockerfile", "FROM x");
+    assert!(matches!(avalia(&r, &novo), Veredito::Achado { .. }));
+    let editado = AmbienteMock::default().com_stage("a/b/Dockerfile", "FROM y");
+    assert_eq!(avalia(&r, &editado), Veredito::Limpo);
+}

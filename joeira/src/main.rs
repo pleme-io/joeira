@@ -12,10 +12,13 @@
 //! missing `core.hooksPath` directory is not an error, which is the default
 //! state of every container, sandbox, CI runner and daemon.
 
+mod gancho;
 mod oraculo;
 
 use clap::{Parser, Subcommand};
-use joeira_core::{AmbienteMock, Ponto, Predicado, Regra, Severidade, Veredito, avalia, prova};
+use joeira_core::{
+    AmbienteMock, Ponto, Predicado, Regra, Severidade, Veredito, Verificador, avalia, prova,
+};
 
 #[derive(Parser)]
 #[command(name = "joeira", about = "The typed git-hook control plane")]
@@ -43,6 +46,19 @@ enum Comando {
     },
     /// Print the mount points and what each may read.
     Pontos,
+    /// The pre-commit hook. P1: every finding advises, exit 0.
+    PreCommit,
+    /// The commit-msg hook, judging the message file git hands over.
+    CommitMsg { arquivo: std::path::PathBuf },
+    /// The pre-push hook; ref-triples arrive on stdin.
+    PrePush { remoto: String, url: String },
+    /// Explain every rule against the staged index, with provenance.
+    Explain {
+        #[arg(long)]
+        staged: bool,
+    },
+    /// The corpus, the kill switch, the tools on PATH and the journal.
+    Status,
     /// Differential against the DEPLOYED incumbent hooks over real history.
     ///
     /// Exits non-zero on an un-triaged disagreement, on an empty denominator,
@@ -68,6 +84,16 @@ fn main() -> anyhow::Result<()> {
             let linhas = oraculo::corre(&repo, n, &regras)?;
             oraculo::relata(&linhas)
         }
+        Comando::PreCommit => gancho_com_corpus(gancho::pre_commit),
+        Comando::CommitMsg { arquivo } => gancho_com_corpus(|r| gancho::commit_msg(r, &arquivo)),
+        Comando::PrePush { remoto, url } => {
+            gancho_com_corpus(|r| gancho::pre_push(r, &remoto, &url))
+        }
+        Comando::Explain { staged } => gancho::explain(&corpus()?, staged),
+        Comando::Status => {
+            gancho::status(&corpus()?);
+            Ok(())
+        }
         Comando::Pontos => {
             for p in Ponto::todos() {
                 println!("  {:<12} reads {:?}", p.arquivo(), p.leitura());
@@ -75,6 +101,18 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+fn gancho_com_corpus(corre: impl FnOnce(&[Regra])) -> anyhow::Result<()> {
+    if gancho::desligado() {
+        corre(&[]);
+        return Ok(());
+    }
+    match corpus() {
+        Ok(regras) => corre(&regras),
+        Err(e) => eprintln!("joeira: DEGRADED, the corpus did not build: {e:#} (exit 0)"),
+    }
+    Ok(())
 }
 
 fn cmd_eval() -> anyhow::Result<()> {
@@ -213,6 +251,10 @@ fn corpus() -> anyhow::Result<Vec<Regra>> {
         if let Some(piso) = t.piso {
             r = r.com_piso(piso);
         }
+        let nivel = f
+            .nivel
+            .ok_or_else(|| anyhow::anyhow!("catalog form {:?} omits :nivel", f.nome))?;
+        r = r.com_origem(nivel, f.gatilho.clone());
         regras.push(r);
     }
     Ok(regras)
@@ -344,8 +386,99 @@ fn testemunhas(f: &joeira_lisp::FormaLida) -> Option<Testemunhas> {
             ),
             piso: None,
         },
+        "nix-flake-untracked" => Testemunhas {
+            predicado: Predicado::Nao(Box::new(Predicado::Rastreado {
+                caminho: "flake.nix".into(),
+            })),
+            bloqueia: AmbienteMock::default().com_arvore("flake.nix"),
+            passa: AmbienteMock::default().com_rastreado("flake.nix"),
+            piso: None,
+        },
+        "nix-flake-check" => externo(Verificador::NixFlakeCheck, "flake.nix"),
+        "nix-flake-lock-age" => {
+            let lock = r#"{"nodes":{"nixpkgs":{"locked":{"lastModified":1000000}},"root":{}}}"#;
+            Testemunhas {
+                predicado: Predicado::LockMaisVelhoQue {
+                    arquivo: "flake.lock".into(),
+                    dias: 30,
+                },
+                bloqueia: AmbienteMock::default()
+                    .com_head("flake.lock", lock)
+                    .com_agora(1_000_000 + 31 * 86_400),
+                passa: AmbienteMock::default()
+                    .com_head("flake.lock", lock)
+                    .com_agora(1_000_000 + 86_400),
+                piso: None,
+            }
+        }
+        "rust-cargo-metadata" => externo(Verificador::CargoMetadata, "Cargo.toml"),
+        "rust-cargo-fetch-locked" => externo(Verificador::CargoFetchLocked, "Cargo.lock"),
+        "rust-cargo-fmt" => externo(Verificador::CargoFmtCheck, "Cargo.toml"),
+        "blue-bluefile-confirm" => externo(Verificador::BlueBluefileConfirm, "Bluefile"),
+        "go-mod-tidy" => externo(Verificador::GoModTidyDiff, "go.mod"),
+        "go-vet" => externo(Verificador::GoVet, "go.mod"),
+        "ci-actionlint" => Testemunhas {
+            predicado: Predicado::Todos(vec![
+                Predicado::CaminhoEmStageSob {
+                    prefixo: ".github/workflows/".into(),
+                },
+                Predicado::Externo {
+                    verificador: Verificador::Actionlint,
+                },
+            ]),
+            bloqueia: AmbienteMock::default()
+                .com_stage(".github/workflows/ci.yml", "on: push\n")
+                .com_execucao(Verificador::Actionlint, 1),
+            passa: AmbienteMock::default()
+                .com_stage(".github/workflows/ci.yml", "on: push\n")
+                .com_execucao(Verificador::Actionlint, 0),
+            piso: None,
+        },
+        "shell-dockerfile-new" => Testemunhas {
+            predicado: Predicado::CaminhoAdicionadoCasa {
+                padroes: vec![
+                    joeira_core::Padrao::novo(
+                        "shell-dockerfile-new",
+                        r"^(Dockerfile|Containerfile)(\..+)?$|\.(Dockerfile|Containerfile)$",
+                    )
+                    .ok()?,
+                ],
+            },
+            bloqueia: AmbienteMock::default().com_adicionado("svc/Dockerfile", "FROM x\n"),
+            passa: AmbienteMock::default()
+                .com_head("svc/Dockerfile", "FROM x\n")
+                .com_stage("svc/Dockerfile", "FROM y\n")
+                .com_adicionado("docs/dockerfiles.md", "x\n"),
+            piso: None,
+        },
+        "shell-script-beyond-glue" => Testemunhas {
+            predicado: Predicado::ScriptAlemDaCola {
+                sufixo: ".sh".into(),
+                linhas_cola: 3,
+            },
+            bloqueia: AmbienteMock::default()
+                .com_adicionado("run.sh", "#!/bin/sh\na\nb\nc\nd\n"),
+            passa: AmbienteMock::default()
+                .com_adicionado("run.sh", "#!/bin/sh\nexec tool \"$@\"\n")
+                .com_head("old.sh", "a\nb\nc\nd\ne\n")
+                .com_stage("old.sh", "a\nb\nc\nd\n"),
+            piso: None,
+        },
         _ => return None,
     })
+}
+
+fn externo(v: Verificador, gatilho: &str) -> Testemunhas {
+    Testemunhas {
+        predicado: Predicado::Externo { verificador: v },
+        bloqueia: AmbienteMock::default()
+            .com_arvore(gatilho)
+            .com_execucao(v, 1),
+        passa: AmbienteMock::default()
+            .com_arvore(gatilho)
+            .com_execucao(v, 0),
+        piso: None,
+    }
 }
 
 #[cfg(test)]
@@ -379,6 +512,18 @@ mod tests {
             "vcs-conflict-markers",
             "gen-lock-tie",
             "sec-plaintext-credential",
+            "nix-flake-untracked",
+            "nix-flake-check",
+            "nix-flake-lock-age",
+            "rust-cargo-metadata",
+            "rust-cargo-fetch-locked",
+            "rust-cargo-fmt",
+            "blue-bluefile-confirm",
+            "go-mod-tidy",
+            "go-vet",
+            "ci-actionlint",
+            "shell-dockerfile-new",
+            "shell-script-beyond-glue",
         ];
         for a in arms {
             assert!(

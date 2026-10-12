@@ -71,6 +71,9 @@ pub enum JoeiraError {
     /// [`Veredito::Cego`].
     #[error("git environment could not answer: {0}")]
     AmbienteCego(String),
+
+    #[error("not checked: {0} absent")]
+    FerramentaAusente(String),
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -290,6 +293,149 @@ impl Severidade {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Nivel {
+    Sistema,
+    Usuario,
+    ClasseDeRepo,
+}
+
+impl Nivel {
+    #[must_use]
+    pub const fn todos() -> &'static [Self] {
+        &[Self::Sistema, Self::Usuario, Self::ClasseDeRepo]
+    }
+
+    #[must_use]
+    pub const fn simbolo(self) -> &'static str {
+        match self {
+            Self::Sistema => "sistema",
+            Self::Usuario => "usuario",
+            Self::ClasseDeRepo => "classe-de-repo",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Verificador {
+    NixFlakeCheck,
+    CargoMetadata,
+    CargoFetchLocked,
+    CargoFmtCheck,
+    GoModTidyDiff,
+    GoVet,
+    Actionlint,
+    BlueBluefileConfirm,
+}
+
+impl Verificador {
+    #[must_use]
+    pub const fn todos() -> &'static [Self] {
+        &[
+            Self::NixFlakeCheck,
+            Self::CargoMetadata,
+            Self::CargoFetchLocked,
+            Self::CargoFmtCheck,
+            Self::GoModTidyDiff,
+            Self::GoVet,
+            Self::Actionlint,
+            Self::BlueBluefileConfirm,
+        ]
+    }
+
+    #[must_use]
+    pub const fn programa(self) -> &'static str {
+        match self {
+            Self::NixFlakeCheck => "nix",
+            Self::CargoMetadata | Self::CargoFetchLocked | Self::CargoFmtCheck => "cargo",
+            Self::GoModTidyDiff | Self::GoVet => "go",
+            Self::Actionlint => "actionlint",
+            Self::BlueBluefileConfirm => "blue",
+        }
+    }
+
+    #[must_use]
+    pub const fn argumentos(self) -> &'static [&'static str] {
+        match self {
+            Self::NixFlakeCheck => &["flake", "check", "--no-build"],
+            Self::CargoMetadata => &["metadata", "--format-version", "1", "--no-deps"],
+            Self::CargoFetchLocked => &["fetch", "--locked"],
+            Self::CargoFmtCheck => &["fmt", "--all", "--check"],
+            Self::GoModTidyDiff => &["mod", "tidy", "-diff"],
+            Self::GoVet => &["vet", "./..."],
+            Self::Actionlint => &[],
+            Self::BlueBluefileConfirm => &["bluefile", "--confirm", "Bluefile"],
+        }
+    }
+
+    #[must_use]
+    pub fn linha(self) -> String {
+        let mut l = self.programa().to_owned();
+        for a in self.argumentos() {
+            l.push(' ');
+            l.push_str(a);
+        }
+        l
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Execucao {
+    pub codigo: i32,
+    pub saida: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Envio {
+    pub ref_local: String,
+    pub sha_local: String,
+    pub ref_remota: String,
+    pub sha_remota: String,
+}
+
+impl Envio {
+    #[must_use]
+    pub fn eh_remocao(&self) -> bool {
+        !self.sha_local.is_empty() && self.sha_local.bytes().all(|b| b == b'0')
+    }
+}
+
+pub fn le_envios(entrada: &str) -> Result<Vec<Envio>, JoeiraError> {
+    let mut envios = Vec::new();
+    for (i, linha) in entrada.lines().enumerate() {
+        let linha = linha.trim();
+        if linha.is_empty() {
+            continue;
+        }
+        let campos: Vec<&str> = linha.split_whitespace().collect();
+        let [ref_local, sha_local, ref_remota, sha_remota] = campos[..] else {
+            return Err(JoeiraError::AmbienteCego(format!(
+                "pre-push stdin line {}: expected `<local ref> <local sha> <remote ref> <remote sha>`, got {} fields",
+                i + 1,
+                campos.len()
+            )));
+        };
+        if ![sha_local, sha_remota]
+            .iter()
+            .all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Err(JoeiraError::AmbienteCego(format!(
+                "pre-push stdin line {}: object names must be hex",
+                i + 1
+            )));
+        }
+        envios.push(Envio {
+            ref_local: ref_local.to_owned(),
+            sha_local: sha_local.to_owned(),
+            ref_remota: ref_remota.to_owned(),
+            sha_remota: sha_remota.to_owned(),
+        });
+    }
+    Ok(envios)
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Padrao — a compiled pattern
 // ═══════════════════════════════════════════════════════════════════
@@ -353,27 +499,38 @@ pub enum Predicado {
     /// `fixup! init` all pass — which is what keeps `git revert`, `git merge`
     /// and `rebase --autosquash` working. A guard that breaks recovery paths
     /// gets switched off.
-    AssuntoNaLista { lista: Vec<String> },
+    AssuntoNaLista {
+        lista: Vec<String>,
+    },
 
     /// The subject's tail after its last colon is in this set. Catches the
     /// placeholder wearing a scope prefix (`updates: init`) while leaving the
     /// accepted `init: <what changed>` form alone.
-    AssuntoCaudaNaLista { lista: Vec<String> },
+    AssuntoCaudaNaLista {
+        lista: Vec<String>,
+    },
 
     /// Some message line contains one of these trailer markers.
-    MensagemTemTrailer { marcadores: Vec<String> },
+    MensagemTemTrailer {
+        marcadores: Vec<String>,
+    },
 
     /// A line ADDED by this commit matches one of these patterns.
     ///
     /// Added lines, never the whole blob: scanning the blob re-accuses every
     /// matching line already in history on every later edit, which is the
     /// false-positive engine rather than a finding.
-    LinhaAdicionadaCasa { padroes: Vec<Padrao> },
+    LinhaAdicionadaCasa {
+        padroes: Vec<Padrao>,
+    },
 
     /// The staged blob carries BOTH of these line prefixes. The pair is
     /// required: a lone `=======` is a markdown rule and a lone `<<<<<<<`
     /// appears in prose about merges.
-    BlobTemParDeLinhas { abre: String, fecha: String },
+    BlobTemParDeLinhas {
+        abre: String,
+        fecha: String,
+    },
 
     /// `sha256(arquivo)` equals the hex value at `campo` in `sidecar`, judged
     /// over the blobs this commit will contain. Structurally FP-free because it
@@ -383,6 +540,32 @@ pub enum Predicado {
         arquivo: String,
         sidecar: String,
         campo: String,
+    },
+
+    Rastreado {
+        caminho: String,
+    },
+
+    CaminhoEmStageSob {
+        prefixo: String,
+    },
+
+    CaminhoAdicionadoCasa {
+        padroes: Vec<Padrao>,
+    },
+
+    ScriptAlemDaCola {
+        sufixo: String,
+        linhas_cola: usize,
+    },
+
+    LockMaisVelhoQue {
+        arquivo: String,
+        dias: u64,
+    },
+
+    Externo {
+        verificador: Verificador,
     },
 
     /// All must hold.
@@ -414,6 +597,12 @@ pub trait AmbienteGit {
     fn blob_em_head(&self, caminho: &str) -> Result<Option<String>, JoeiraError>;
     /// sha256 hex of the staged blob at `caminho`.
     fn sha256_em_stage(&self, caminho: &str) -> Result<String, JoeiraError>;
+    fn caminhos_adicionados(&self) -> Result<Vec<String>, JoeiraError>;
+    fn existe(&self, caminho: &str) -> Result<bool, JoeiraError>;
+    fn rastreado(&self, caminho: &str) -> Result<bool, JoeiraError>;
+    fn agora_unix(&self) -> Result<u64, JoeiraError>;
+    fn envios(&self) -> Result<Vec<Envio>, JoeiraError>;
+    fn executa(&self, v: Verificador) -> Result<Execucao, JoeiraError>;
 }
 
 /// A fully in-memory environment. The engine's test seam.
@@ -428,6 +617,12 @@ pub struct AmbienteMock {
     pub shas: BTreeMap<String, String>,
     /// Force every read to fail, to exercise the `Cego` arm.
     pub cego: bool,
+    pub adicionados: std::collections::BTreeSet<String>,
+    pub arvore: std::collections::BTreeSet<String>,
+    pub rastreados: std::collections::BTreeSet<String>,
+    pub agora: u64,
+    pub envios: Vec<Envio>,
+    pub execucoes: BTreeMap<Verificador, Execucao>,
 }
 
 impl AmbienteMock {
@@ -455,6 +650,50 @@ impl AmbienteMock {
     pub fn com_sha(mut self, caminho: &str, sha: &str) -> Self {
         self.shas.insert(caminho.to_owned(), sha.to_owned());
         self
+    }
+
+    #[must_use]
+    pub fn com_adicionado(mut self, caminho: &str, conteudo: &str) -> Self {
+        self.adicionados.insert(caminho.to_owned());
+        self.com_stage(caminho, conteudo)
+    }
+
+    #[must_use]
+    pub fn com_arvore(mut self, caminho: &str) -> Self {
+        self.arvore.insert(caminho.to_owned());
+        self
+    }
+
+    #[must_use]
+    pub fn com_rastreado(mut self, caminho: &str) -> Self {
+        self.arvore.insert(caminho.to_owned());
+        self.rastreados.insert(caminho.to_owned());
+        self
+    }
+
+    #[must_use]
+    pub const fn com_agora(mut self, agora: u64) -> Self {
+        self.agora = agora;
+        self
+    }
+
+    #[must_use]
+    pub fn com_execucao(mut self, v: Verificador, codigo: i32) -> Self {
+        self.execucoes.insert(
+            v,
+            Execucao {
+                codigo,
+                saida: String::new(),
+            },
+        );
+        self
+    }
+
+    fn olha(&self) -> Result<(), JoeiraError> {
+        if self.cego {
+            return Err(JoeiraError::AmbienteCego("mock is blind".into()));
+        }
+        Ok(())
     }
 }
 
@@ -493,6 +732,42 @@ impl AmbienteGit for AmbienteMock {
         }
         Ok(self.shas.get(caminho).cloned().unwrap_or_default())
     }
+
+    fn caminhos_adicionados(&self) -> Result<Vec<String>, JoeiraError> {
+        self.olha()?;
+        Ok(self.adicionados.iter().cloned().collect())
+    }
+
+    fn existe(&self, caminho: &str) -> Result<bool, JoeiraError> {
+        self.olha()?;
+        let sob = |c: &String| c == caminho || c.starts_with(caminho);
+        Ok(self.arvore.iter().any(sob) || self.stage.keys().any(sob) || self.head.keys().any(sob))
+    }
+
+    fn rastreado(&self, caminho: &str) -> Result<bool, JoeiraError> {
+        self.olha()?;
+        Ok(self.rastreados.contains(caminho)
+            || self.stage.contains_key(caminho)
+            || self.head.contains_key(caminho))
+    }
+
+    fn agora_unix(&self) -> Result<u64, JoeiraError> {
+        self.olha()?;
+        Ok(self.agora)
+    }
+
+    fn envios(&self) -> Result<Vec<Envio>, JoeiraError> {
+        self.olha()?;
+        Ok(self.envios.clone())
+    }
+
+    fn executa(&self, v: Verificador) -> Result<Execucao, JoeiraError> {
+        self.olha()?;
+        self.execucoes
+            .get(&v)
+            .cloned()
+            .ok_or_else(|| JoeiraError::FerramentaAusente(v.programa().to_owned()))
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -517,6 +792,8 @@ pub struct Regra {
     prova_bloqueia: AmbienteMock,
     /// An environment this rule MUST pass.
     prova_passa: AmbienteMock,
+    nivel: Nivel,
+    gatilho: Option<String>,
 }
 
 impl Regra {
@@ -544,7 +821,36 @@ impl Regra {
             mensagem: mensagem.into(),
             prova_bloqueia,
             prova_passa,
+            nivel: Nivel::Sistema,
+            gatilho: None,
         }
+    }
+
+    #[must_use]
+    pub fn com_origem(mut self, nivel: Nivel, gatilho: Option<String>) -> Self {
+        self.nivel = nivel;
+        self.gatilho = gatilho;
+        self
+    }
+
+    #[must_use]
+    pub const fn nivel(&self) -> Nivel {
+        self.nivel
+    }
+
+    #[must_use]
+    pub fn gatilho(&self) -> Option<&str> {
+        self.gatilho.as_deref()
+    }
+
+    #[must_use]
+    pub const fn reversibilidade(&self) -> Reversibilidade {
+        self.reversibilidade
+    }
+
+    #[must_use]
+    pub const fn fp(&self) -> ClasseFalsoPositivo {
+        self.fp
     }
 
     /// Raise this rule's floor. **Clamped to the derived ceiling**, so a floor
@@ -627,6 +933,23 @@ impl Veredito {
 
 /// Evaluate one rule against one environment.
 pub fn avalia<E: AmbienteGit + ?Sized>(regra: &Regra, amb: &E) -> Veredito {
+    if let Some(g) = &regra.gatilho {
+        match amb.existe(g) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Veredito::NaoSeAplica {
+                    regra: regra.nome.clone(),
+                    porque: format!("trigger `{g}` absent"),
+                };
+            }
+            Err(e) => {
+                return Veredito::Cego {
+                    regra: regra.nome.clone(),
+                    porque: e.to_string(),
+                };
+            }
+        }
+    }
     match sustenta(&regra.predicado, amb) {
         Ok(true) => Veredito::Achado {
             regra: regra.nome.clone(),
@@ -738,6 +1061,44 @@ fn sustenta<E: AmbienteGit + ?Sized>(p: &Predicado, amb: &E) -> Result<bool, Joe
             let atual = amb.sha256_em_stage(arquivo)?;
             Ok(!atual.is_empty() && atual != gravado)
         }
+        Predicado::Rastreado { caminho } => amb.rastreado(caminho),
+        Predicado::CaminhoEmStageSob { prefixo } => Ok(amb
+            .caminhos_em_stage()?
+            .iter()
+            .any(|c| c.starts_with(prefixo.as_str()))),
+        Predicado::CaminhoAdicionadoCasa { padroes } => {
+            Ok(amb.caminhos_adicionados()?.iter().any(|c| {
+                let base = c.rsplit('/').next().unwrap_or(c);
+                padroes.iter().any(|p| p.casa(base))
+            }))
+        }
+        Predicado::ScriptAlemDaCola {
+            sufixo,
+            linhas_cola,
+        } => {
+            for caminho in amb.caminhos_em_stage()? {
+                if !caminho.ends_with(sufixo.as_str()) {
+                    continue;
+                }
+                let agora = conta_linhas(&amb.blob_em_stage(&caminho)?);
+                let antes = amb.blob_em_head(&caminho)?.map(|b| conta_linhas(&b));
+                if agora > *linhas_cola && antes.is_none_or(|a| agora > a) {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        Predicado::LockMaisVelhoQue { arquivo, dias } => {
+            let Some(doc) = amb.blob_em_head(arquivo)? else {
+                return Ok(false);
+            };
+            let Some(mais_novo) = ultimo_lastmodified(&doc) else {
+                return Ok(false);
+            };
+            let agora = amb.agora_unix()?;
+            Ok(agora.saturating_sub(mais_novo) > dias.saturating_mul(86_400))
+        }
+        Predicado::Externo { verificador } => Ok(amb.executa(*verificador)?.codigo != 0),
         Predicado::Todos(ps) => {
             for p in ps {
                 if !sustenta(p, amb)? {
@@ -756,6 +1117,24 @@ fn sustenta<E: AmbienteGit + ?Sized>(p: &Predicado, amb: &E) -> Result<bool, Joe
         }
         Predicado::Nao(p) => Ok(!sustenta(p, amb)?),
     }
+}
+
+fn conta_linhas(blob: &str) -> usize {
+    blob.lines()
+        .filter(|l| {
+            let t = l.trim();
+            !t.is_empty() && !t.starts_with('#')
+        })
+        .count()
+}
+
+fn ultimo_lastmodified(doc: &str) -> Option<u64> {
+    let v: serde_json::Value = serde_json::from_str(doc).ok()?;
+    v.get("nodes")?
+        .as_object()?
+        .values()
+        .filter_map(|n| n.get("locked")?.get("lastModified")?.as_u64())
+        .max()
 }
 
 /// Pull `"<campo>": "<hex>"` out of a JSON-ish document without a JSON parser.

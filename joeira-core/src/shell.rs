@@ -60,10 +60,42 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
-use crate::{AmbienteGit, JoeiraError};
+use crate::{AmbienteGit, Envio, Execucao, JoeiraError, Verificador};
+
+#[derive(Debug, Clone)]
+struct EntradaIndice {
+    caminho: String,
+    sha_head: Option<String>,
+    sha_stage: String,
+}
+
+pub fn raiz_de(dir: &Path) -> Result<PathBuf, JoeiraError> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(dir)
+        .output()
+        .map_err(|e| {
+            JoeiraError::AmbienteCego(format!(
+                "spawning `git rev-parse --show-toplevel` in {}: {e}",
+                dir.display()
+            ))
+        })?;
+    if !out.status.success() {
+        return Err(JoeiraError::AmbienteCego(format!(
+            "`git rev-parse --show-toplevel` in {} exited {}: {}",
+            dir.display(),
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(PathBuf::from(
+        String::from_utf8_lossy(&out.stdout).trim_end_matches(['\n', '\r']),
+    ))
+}
 
 /// A repository read through `git` subprocesses.
 pub struct AmbienteShell {
@@ -84,6 +116,9 @@ pub struct AmbienteShell {
     /// commit's subject and reported a systematic disagreement that looks like
     /// an engine difference.
     mensagem_forcada: Option<String>,
+    indice: RefCell<Option<Vec<EntradaIndice>>>,
+    carregado: RefCell<bool>,
+    envios: Vec<Envio>,
 }
 
 impl AmbienteShell {
@@ -101,7 +136,146 @@ impl AmbienteShell {
             head: RefCell::new(BTreeMap::new()),
             caminhos: RefCell::new(None),
             mensagem_forcada: None,
+            indice: RefCell::new(None),
+            carregado: RefCell::new(false),
+            envios: Vec::new(),
         }
+    }
+
+    #[must_use]
+    pub fn com_envios(mut self, envios: Vec<Envio>) -> Self {
+        self.envios = envios;
+        self
+    }
+
+    fn entradas(&self) -> Result<Vec<EntradaIndice>, JoeiraError> {
+        if let Some(e) = self.indice.borrow().as_ref() {
+            return Ok(e.clone());
+        }
+        let out = self.git(&[
+            "diff",
+            "--cached",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--no-abbrev",
+            "--diff-filter=ACM",
+        ])?;
+        let mut entradas = Vec::new();
+        let mut partes = out.split('\0').filter(|p| !p.is_empty());
+        while let Some(meta) = partes.next() {
+            let Some(caminho) = partes.next() else {
+                return Err(JoeiraError::AmbienteCego(format!(
+                    "`git diff --cached --raw -z` record {meta:?} has no path"
+                )));
+            };
+            let campos: Vec<&str> = meta.trim_start_matches(':').split(' ').collect();
+            let [_, _, antigo, novo, _] = campos[..] else {
+                return Err(JoeiraError::AmbienteCego(format!(
+                    "`git diff --cached --raw -z` record {meta:?} is not five fields"
+                )));
+            };
+            let nulo = |s: &str| s.bytes().all(|b| b == b'0');
+            entradas.push(EntradaIndice {
+                caminho: caminho.to_owned(),
+                sha_head: (!nulo(antigo)).then(|| antigo.to_owned()),
+                sha_stage: novo.to_owned(),
+            });
+        }
+        *self.indice.borrow_mut() = Some(entradas.clone());
+        Ok(entradas)
+    }
+
+    fn carrega(&self) -> Result<(), JoeiraError> {
+        if *self.carregado.borrow() {
+            return Ok(());
+        }
+        let entradas = self.entradas()?;
+        let mut pedidos: Vec<String> = Vec::with_capacity(entradas.len() * 2);
+        for e in &entradas {
+            pedidos.push(e.sha_stage.clone());
+            if let Some(h) = &e.sha_head {
+                pedidos.push(h.clone());
+            }
+        }
+        let blobs = self.cat_file(&pedidos)?;
+        let mut stage = self.stage.borrow_mut();
+        let mut head = self.head.borrow_mut();
+        for e in &entradas {
+            if let Some(b) = blobs.get(&e.sha_stage) {
+                stage.insert(e.caminho.clone(), b.clone());
+            }
+            match &e.sha_head {
+                Some(h) => {
+                    if let Some(b) = blobs.get(h) {
+                        head.insert(e.caminho.clone(), Some(b.clone()));
+                    }
+                }
+                None => {
+                    head.insert(e.caminho.clone(), None);
+                }
+            }
+        }
+        *self.carregado.borrow_mut() = true;
+        Ok(())
+    }
+
+    fn cat_file(&self, shas: &[String]) -> Result<BTreeMap<String, String>, JoeiraError> {
+        let mut blobs = BTreeMap::new();
+        if shas.is_empty() {
+            return Ok(blobs);
+        }
+        let cego = |e: &dyn std::fmt::Display| {
+            JoeiraError::AmbienteCego(format!(
+                "`git cat-file --batch` in {}: {e}",
+                self.repo.display()
+            ))
+        };
+        let mut filho = Command::new("git")
+            .args(["cat-file", "--batch"])
+            .current_dir(&self.repo)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| cego(&e))?;
+        let mut entrada = filho.stdin.take().ok_or_else(|| cego(&"no stdin"))?;
+        let pedido: String = shas.iter().flat_map(|s| [s.as_str(), "\n"]).collect();
+        let escritor = std::thread::spawn(move || entrada.write_all(pedido.as_bytes()));
+        let mut saida = Vec::new();
+        filho
+            .stdout
+            .take()
+            .ok_or_else(|| cego(&"no stdout"))?
+            .read_to_end(&mut saida)
+            .map_err(|e| cego(&e))?;
+        escritor
+            .join()
+            .map_err(|_| cego(&"writer panicked"))?
+            .map_err(|e| cego(&e))?;
+        let estado = filho.wait().map_err(|e| cego(&e))?;
+        if !estado.success() {
+            return Err(cego(&format!("exited {}", estado.code().unwrap_or(-1))));
+        }
+        let mut i = 0;
+        while i < saida.len() {
+            let fim = saida[i..]
+                .iter()
+                .position(|b| *b == b'\n')
+                .ok_or_else(|| cego(&"truncated header"))?
+                + i;
+            let cabeca = String::from_utf8_lossy(&saida[i..fim]).into_owned();
+            let campos: Vec<&str> = cabeca.split(' ').collect();
+            i = fim + 1;
+            let [sha, _, tamanho] = campos[..] else {
+                return Err(cego(&format!("object {cabeca:?} is missing")));
+            };
+            let n: usize = tamanho.parse().map_err(|_| cego(&cabeca))?;
+            let corpo = saida.get(i..i + n).ok_or_else(|| cego(&"truncated body"))?;
+            blobs.insert(sha.to_owned(), String::from_utf8_lossy(corpo).into_owned());
+            i += n + 1;
+        }
+        Ok(blobs)
     }
 
     /// Judge `msg` instead of HEAD's message.
@@ -197,47 +371,13 @@ impl AmbienteGit for AmbienteShell {
         if let Some(cached) = self.caminhos.borrow().as_ref() {
             return Ok(cached.clone());
         }
-        // `-z` is NOT a tidiness flag, and it closes a live bypass. Without it
-        // git applies `core.quotePath`, which is ON by default, and reports any
-        // path containing a non-ASCII byte in C-quoted form —
-        // `"caf\303\251.txt"` for `café.txt`. That quoted string is not the
-        // path, so `git show :"caf\303\251.txt"` fails, and a gate that does
-        // not check status reads the empty stdout as "this file adds nothing"
-        // and passes the commit.
-        //
-        // MEASURED 2026-08-18 against the deployed incumbent hook: a file named
-        // `café.txt` containing `password: hunter2supersecret` exits 0 —
-        // invisible to the credential gate, the conflict-marker gate and the D2
-        // tie alike. Any CJK, Cyrillic, accented or emoji filename is in that
-        // class, which makes it much broader than the pathological
-        // newline-in-filename case that first surfaced it (found by the oracle
-        // as two `Cego` rows on a commit that had accidentally staged paths with
-        // embedded newlines).
-        //
-        // `-z` emits paths VERBATIM, NUL-separated, so the quoting never
-        // happens. Splitting on NUL rather than newline is then also correct for
-        // a path that genuinely contains a newline.
-        //
-        // joeira reported `Cego` here rather than `Limpo` even before this fix,
-        // which is the whole argument for the four-arm verdict: "I could not
-        // see" and "there is nothing to see" must not render the same.
-        let out = self.git(&[
-            "diff",
-            "--cached",
-            "--name-only",
-            "-z",
-            "--diff-filter=ACMR",
-        ])?;
-        let paths: Vec<String> = out
-            .split('\0')
-            .filter(|l| !l.is_empty())
-            .map(str::to_owned)
-            .collect();
+        let paths: Vec<String> = self.entradas()?.into_iter().map(|e| e.caminho).collect();
         *self.caminhos.borrow_mut() = Some(paths.clone());
         Ok(paths)
     }
 
     fn blob_em_stage(&self, caminho: &str) -> Result<String, JoeiraError> {
+        self.carrega()?;
         if let Some(hit) = self.stage.borrow().get(caminho) {
             return Ok(hit.clone());
         }
@@ -252,6 +392,7 @@ impl AmbienteGit for AmbienteShell {
     }
 
     fn blob_em_head(&self, caminho: &str) -> Result<Option<String>, JoeiraError> {
+        self.carrega()?;
         if let Some(hit) = self.head.borrow().get(caminho) {
             return Ok(hit.clone());
         }
@@ -267,6 +408,59 @@ impl AmbienteGit for AmbienteShell {
         // shared and the quantity is the one the sidecar records.
         let blob = self.blob_em_stage(caminho)?;
         Ok(sha256_hex(blob.as_bytes()))
+    }
+
+    fn caminhos_adicionados(&self) -> Result<Vec<String>, JoeiraError> {
+        Ok(self
+            .entradas()?
+            .into_iter()
+            .filter(|e| e.sha_head.is_none())
+            .map(|e| e.caminho)
+            .collect())
+    }
+
+    fn existe(&self, caminho: &str) -> Result<bool, JoeiraError> {
+        Ok(self.repo.join(caminho).exists())
+    }
+
+    fn rastreado(&self, caminho: &str) -> Result<bool, JoeiraError> {
+        Ok(self
+            .git_opcional(&["ls-files", "--error-unmatch", "--", caminho])?
+            .is_some())
+    }
+
+    fn agora_unix(&self) -> Result<u64, JoeiraError> {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .map_err(|e| JoeiraError::AmbienteCego(e.to_string()))
+    }
+
+    fn envios(&self) -> Result<Vec<Envio>, JoeiraError> {
+        Ok(self.envios.clone())
+    }
+
+    fn executa(&self, v: Verificador) -> Result<Execucao, JoeiraError> {
+        let out = Command::new(v.programa())
+            .args(v.argumentos())
+            .current_dir(&self.repo)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    JoeiraError::FerramentaAusente(v.programa().to_owned())
+                } else {
+                    JoeiraError::AmbienteCego(format!(
+                        "spawning `{}` in {}: {e}",
+                        v.linha(),
+                        self.repo.display()
+                    ))
+                }
+            })?;
+        Ok(Execucao {
+            codigo: out.status.code().unwrap_or(-1),
+            saida: String::from_utf8_lossy(&out.stdout).into_owned(),
+        })
     }
 }
 

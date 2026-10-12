@@ -1,0 +1,372 @@
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+use joeira_core::journal::{Diario, Registro, TagVeredito};
+use joeira_core::shell::{AmbienteShell, raiz_de};
+use joeira_core::{
+    AmbienteGit, Nivel, Ponto, Regra, Severidade, Veredito, Verificador, avalia, le_envios,
+};
+
+pub const CHAVE_DESLIGA: &str = "JOEIRA_OFF";
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Balanco {
+    pub regras: usize,
+    pub achados: usize,
+    pub cegos: usize,
+    pub fora: usize,
+}
+
+pub fn desligado() -> bool {
+    std::env::var(CHAVE_DESLIGA).is_ok_and(|v| v == "1")
+}
+
+fn protegido(ponto: Ponto, corpo: impl FnOnce() -> anyhow::Result<()>) {
+    if desligado() {
+        eprintln!(
+            "joeira {}: DISABLED by {CHAVE_DESLIGA}=1 — no rule was evaluated",
+            ponto.arquivo()
+        );
+        return;
+    }
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(corpo)) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => eprintln!(
+            "joeira {}: DEGRADED, nothing was judged: {e:#} (exit 0, advisory at P1)",
+            ponto.arquivo()
+        ),
+        Err(_) => eprintln!(
+            "joeira {}: DEGRADED, the engine panicked (exit 0, advisory at P1)",
+            ponto.arquivo()
+        ),
+    }
+}
+
+fn raiz() -> anyhow::Result<PathBuf> {
+    let aqui = std::env::current_dir()?;
+    Ok(raiz_de(&aqui)?)
+}
+
+pub fn le_mensagem(bruta: &str) -> String {
+    let mut linhas = Vec::new();
+    for l in bruta.lines() {
+        if l.starts_with("# ------------------------ >8 ------------------------") {
+            break;
+        }
+        if !l.starts_with('#') {
+            linhas.push(l);
+        }
+    }
+    let mut m = linhas.join("\n");
+    m.truncate(m.trim_end().len());
+    m
+}
+
+pub fn julga<E: AmbienteGit + ?Sized>(
+    ponto: Ponto,
+    regras: &[Regra],
+    amb: &E,
+    repo: &Path,
+    diario: Option<&Diario>,
+) -> Balanco {
+    let mut b = Balanco::default();
+    for r in regras.iter().filter(|r| r.ponto() == ponto) {
+        b.regras += 1;
+        let v = avalia(r, amb);
+        match &v {
+            Veredito::Achado {
+                regra, mensagem, ..
+            } => {
+                b.achados += 1;
+                eprintln!(
+                    "joeira {}: WARN {regra} [{}]: {mensagem}",
+                    ponto.arquivo(),
+                    r.nivel().simbolo()
+                );
+            }
+            Veredito::Cego { regra, porque } => {
+                b.cegos += 1;
+                eprintln!("joeira {}: NOT CHECKED {regra}: {porque}", ponto.arquivo());
+            }
+            Veredito::NaoSeAplica { .. } => b.fora += 1,
+            Veredito::Limpo => {}
+        }
+        if let Some(d) = diario {
+            let reg = Registro {
+                regra: r.nome().to_owned(),
+                veredito: TagVeredito::from(&v),
+                repo: repo.display().to_string(),
+                quando: joeira_core::journal::agora(),
+                severidade: matches!(v, Veredito::Achado { .. }).then_some(Severidade::Avisa),
+            };
+            if let Err(e) = d.registrar(&reg) {
+                eprintln!("joeira {}: journal not written: {e}", ponto.arquivo());
+            }
+        }
+    }
+    eprintln!(
+        "joeira {}: {} rules, {} findings, {} not checked, {} not applicable — advisory (P1), exit 0",
+        ponto.arquivo(),
+        b.regras,
+        b.achados,
+        b.cegos,
+        b.fora
+    );
+    b
+}
+
+pub fn pre_commit(regras: &[Regra]) {
+    protegido(Ponto::PreCommit, || {
+        let repo = raiz()?;
+        let amb = AmbienteShell::novo(&repo);
+        julga(
+            Ponto::PreCommit,
+            regras,
+            &amb,
+            &repo,
+            Diario::padrao().as_ref(),
+        );
+        Ok(())
+    });
+}
+
+pub fn commit_msg(regras: &[Regra], arquivo: &Path) {
+    protegido(Ponto::CommitMsg, || {
+        let bruta = std::fs::read(arquivo)
+            .map_err(|e| anyhow::anyhow!("cannot read message file {}: {e}", arquivo.display()))?;
+        let msg = le_mensagem(&String::from_utf8_lossy(&bruta));
+        if msg.is_empty() {
+            eprintln!(
+                "joeira commit-msg: the message in {} is EMPTY — judging it as empty",
+                arquivo.display()
+            );
+        }
+        let repo = raiz()?;
+        let amb = AmbienteShell::novo(&repo).com_mensagem(&msg);
+        julga(
+            Ponto::CommitMsg,
+            regras,
+            &amb,
+            &repo,
+            Diario::padrao().as_ref(),
+        );
+        Ok(())
+    });
+}
+
+pub fn pre_push(regras: &[Regra], remoto: &str, url: &str) {
+    protegido(Ponto::PrePush, || {
+        let mut entrada = String::new();
+        std::io::stdin()
+            .read_to_string(&mut entrada)
+            .map_err(|e| anyhow::anyhow!("cannot read pre-push stdin: {e}"))?;
+        let envios = le_envios(&entrada)?;
+        let vivos: Vec<_> = envios.into_iter().filter(|e| !e.eh_remocao()).collect();
+        if vivos.is_empty() {
+            eprintln!(
+                "joeira pre-push: no ref-triples to judge on stdin for {remoto} ({url}) — nothing was checked"
+            );
+            return Ok(());
+        }
+        let repo = raiz()?;
+        let amb = AmbienteShell::novo(&repo).com_envios(vivos);
+        julga(
+            Ponto::PrePush,
+            regras,
+            &amb,
+            &repo,
+            Diario::padrao().as_ref(),
+        );
+        Ok(())
+    });
+}
+
+pub fn explain(regras: &[Regra], staged: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        staged,
+        "explain needs --staged; it judges the index as pre-commit would"
+    );
+    let repo = raiz()?;
+    let amb = AmbienteShell::novo(&repo);
+    println!("joeira explain --staged in {}", repo.display());
+    println!(
+        "source: joeira-lisp/catalogo/joeira.tlisp (compiled in), joeira {}",
+        env!("CARGO_PKG_VERSION")
+    );
+    for r in regras {
+        let cabeca = format!(
+            "{} @{} layer={} trigger={}",
+            r.nome(),
+            r.ponto().arquivo(),
+            r.nivel().simbolo(),
+            r.gatilho().unwrap_or("-")
+        );
+        let porque = format!(
+            "axes {} x {} => ceiling {:?}; floor {:?}; acts at Avisa (P1)",
+            r.reversibilidade().simbolo(),
+            r.fp().simbolo(),
+            r.tecto(),
+            r.severidade()
+        );
+        if r.ponto() != Ponto::PreCommit {
+            println!(
+                "  -      {cabeca}\n         not evaluated: mounts at {}\n         {porque}",
+                r.ponto().arquivo()
+            );
+            continue;
+        }
+        let (marca, detalhe) = match avalia(r, &amb) {
+            Veredito::Achado { mensagem, .. } => ("WARN ", mensagem),
+            Veredito::Limpo => ("clean", "predicate does not hold on the index".to_owned()),
+            Veredito::NaoSeAplica { porque, .. } => ("n/a  ", porque),
+            Veredito::Cego { porque, .. } => ("BLIND", porque),
+        };
+        println!("  {marca}  {cabeca}\n         {detalhe}\n         {porque}");
+    }
+    Ok(())
+}
+
+pub fn no_path(programa: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|d| d.join(programa))
+        .find(|c| c.is_file())
+}
+
+pub fn status(regras: &[Regra]) {
+    println!(
+        "joeira {} — P1, every rule advises",
+        env!("CARGO_PKG_VERSION")
+    );
+    println!(
+        "kill switch: {CHAVE_DESLIGA}={}",
+        if desligado() {
+            "1 (hooks DISABLED)"
+        } else {
+            "unset (hooks armed)"
+        }
+    );
+    println!("corpus: {} rules", regras.len());
+    for p in Ponto::todos() {
+        let n = regras.iter().filter(|r| r.ponto() == *p).count();
+        println!("  {:<11} {n}", p.arquivo());
+    }
+    for nv in Nivel::todos() {
+        let n = regras.iter().filter(|r| r.nivel() == *nv).count();
+        println!("  layer {:<15} {n}", nv.simbolo());
+    }
+    println!("tools:");
+    let mut vistos = Vec::new();
+    for v in Verificador::todos() {
+        let prog = v.programa();
+        if vistos.contains(&prog) {
+            continue;
+        }
+        vistos.push(prog);
+        match no_path(prog) {
+            Some(c) => println!("  {prog:<11} {}", c.display()),
+            None => println!("  {prog:<11} ABSENT — its rows report `not checked`"),
+        }
+    }
+    match Diario::padrao() {
+        Some(d) => match d.registros() {
+            Ok(r) => println!(
+                "journal: {} ({} records)",
+                d.caminho().as_path().display(),
+                r.len()
+            ),
+            Err(e) => println!(
+                "journal: {} (unreadable: {e})",
+                d.caminho().as_path().display()
+            ),
+        },
+        None => println!("journal: no state directory resolved"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use joeira_core::{AmbienteMock, ClasseFalsoPositivo, Predicado, Reversibilidade};
+
+    #[test]
+    fn the_message_file_drops_comments_and_the_scissors_tail() {
+        let m = le_mensagem(
+            "feat: x\n\nbody\n# Please enter\n# ------------------------ >8 ------------------------\ndiff\n",
+        );
+        assert_eq!(m, "feat: x\n\nbody");
+    }
+
+    #[test]
+    fn an_empty_message_file_reads_empty() {
+        assert_eq!(le_mensagem(""), "");
+    }
+
+    fn regra_externa() -> Regra {
+        Regra::nova(
+            "x",
+            Ponto::PrePush,
+            Predicado::Externo {
+                verificador: Verificador::GoVet,
+            },
+            Reversibilidade::Recuperavel,
+            ClasseFalsoPositivo::Limiar,
+            "m",
+            AmbienteMock::default(),
+            AmbienteMock::default(),
+        )
+        .com_origem(Nivel::ClasseDeRepo, Some("go.mod".into()))
+    }
+
+    #[test]
+    fn julga_counts_only_its_point_and_never_gates() {
+        let r = regra_externa();
+        let amb = AmbienteMock::default()
+            .com_arvore("go.mod")
+            .com_execucao(Verificador::GoVet, 2);
+        let b = julga(
+            Ponto::PrePush,
+            std::slice::from_ref(&r),
+            &amb,
+            Path::new("/x"),
+            None,
+        );
+        assert_eq!(
+            b,
+            Balanco {
+                regras: 1,
+                achados: 1,
+                cegos: 0,
+                fora: 0
+            }
+        );
+        let b = julga(Ponto::PreCommit, &[r], &amb, Path::new("/x"), None);
+        assert_eq!(b.regras, 0);
+    }
+
+    #[test]
+    fn an_absent_tool_is_counted_not_checked() {
+        let amb = AmbienteMock::default().com_arvore("go.mod");
+        let b = julga(
+            Ponto::PrePush,
+            &[regra_externa()],
+            &amb,
+            Path::new("/x"),
+            None,
+        );
+        assert_eq!(b.cegos, 1);
+        assert_eq!(b.achados, 0);
+    }
+
+    #[test]
+    fn an_absent_trigger_is_not_applicable() {
+        let b = julga(
+            Ponto::PrePush,
+            &[regra_externa()],
+            &AmbienteMock::default(),
+            Path::new("/x"),
+            None,
+        );
+        assert_eq!(b.fora, 1);
+    }
+}
