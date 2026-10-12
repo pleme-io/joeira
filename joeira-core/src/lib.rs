@@ -243,16 +243,40 @@ impl ClasseFalsoPositivo {
 #[serde(rename_all = "kebab-case")]
 pub enum Severidade {
     /// Printed, never gating. The birth state of every rule.
+    #[serde(alias = "advise")]
     Consultivo,
     /// Printed and counted against a baseline that may not grow.
+    #[serde(alias = "warn-with-ratchet")]
     AvisaComCatraca,
     /// Printed loudly, exit 0.
+    #[serde(alias = "warn")]
     Avisa,
     /// Exit non-zero.
+    #[serde(alias = "block")]
     Bloqueia,
 }
 
 impl Severidade {
+    #[must_use]
+    pub const fn todos() -> &'static [Self] {
+        &[
+            Self::Consultivo,
+            Self::AvisaComCatraca,
+            Self::Avisa,
+            Self::Bloqueia,
+        ]
+    }
+
+    #[must_use]
+    pub const fn simbolo(self) -> &'static str {
+        match self {
+            Self::Consultivo => "consultivo",
+            Self::AvisaComCatraca => "avisa-com-catraca",
+            Self::Avisa => "avisa",
+            Self::Bloqueia => "bloqueia",
+        }
+    }
+
     /// **The projection an author cannot route around.** Severity is a total
     /// function of `(reversibility × false-positive-class)`; there is no
     /// constructor that takes a severity directly, so "an unjustified block"
@@ -1199,6 +1223,7 @@ pub fn prova(regras: &[Regra]) -> (usize, Vec<Prova>) {
     (regras.len(), rows)
 }
 
+pub mod camadas;
 pub mod journal;
 pub mod shell;
 

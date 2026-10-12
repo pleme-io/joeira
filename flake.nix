@@ -17,13 +17,26 @@
   outputs = inputs @ { self, nixpkgs, crate2nix, flake-utils, substrate, ... }:
     let
       inherit (nixpkgs.lib) mkOption types;
-      severity = types.enum [ "advise" "warn-with-ratchet" "warn" "block" ];
+      canonical = {
+        consultivo = "consultivo";
+        avisa-com-catraca = "avisa-com-catraca";
+        avisa = "avisa";
+        bloqueia = "bloqueia";
+        advise = "consultivo";
+        warn-with-ratchet = "avisa-com-catraca";
+        warn = "avisa";
+        block = "bloqueia";
+      };
+      severity = types.enum (builtins.attrNames canonical);
       floors = description: mkOption {
         type = types.attrsOf severity;
         default = { };
         inherit description;
       };
-      layer = nivel: pisos: builtins.toJSON { inherit nivel pisos; };
+      layer = nivel: rules: builtins.toJSON {
+        inherit nivel;
+        pisos = builtins.mapAttrs (_: s: canonical.${s}) rules;
+      };
       systemLayer = { cfg, ... }: {
         environment.etc."joeira/sistema.json".text = layer "sistema" cfg.rules;
       };
