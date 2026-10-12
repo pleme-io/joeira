@@ -790,3 +790,47 @@ fn a_path_not_checked_is_skipped_by_blob_rules_never_judged() {
     assert_eq!(avalia(&r, &amb), Veredito::Limpo);
     assert_eq!(amb.nao_verificados().len(), 1);
 }
+
+fn regra_externa_lenta() -> Regra {
+    Regra::nova(
+        "nix-eval",
+        Ponto::PrePush,
+        Predicado::Externo {
+            verificador: Verificador::NixFlakeCheck,
+        },
+        Reversibilidade::Custoso,
+        ClasseFalsoPositivo::ZeroEstrutural,
+        "m",
+        AmbienteMock::default(),
+        AmbienteMock::default(),
+    )
+}
+
+#[test]
+fn a_tool_over_its_budget_is_blind_never_clean_never_found() {
+    let r = regra_externa_lenta();
+    assert_eq!(r.orcamento().as_secs(), 20);
+    assert_eq!(regra_assunto_placeholder().orcamento().as_secs(), 3);
+    let mut amb = AmbienteMock::default().com_execucao(Verificador::NixFlakeCheck, 1);
+    amb.lentos.insert(Verificador::NixFlakeCheck);
+    match avalia(&r, &amb) {
+        Veredito::Cego { porque, .. } => {
+            assert!(porque.contains("exceeded its 20s budget"), "{porque}");
+        }
+        outro => panic!("{outro:?}"),
+    }
+    assert!(!avalia(&r, &amb).gateia());
+}
+
+#[test]
+fn a_range_gated_row_runs_only_when_the_push_touches_its_paths() {
+    let r = regra_externa_lenta().com_toca(vec![".nix".into(), "flake.lock".into()]);
+    let mut amb = AmbienteMock::default().com_execucao(Verificador::NixFlakeCheck, 1);
+    amb.enviados.insert("README.md".into());
+    assert!(matches!(avalia(&r, &amb), Veredito::NaoSeAplica { .. }));
+    amb.enviados.insert("lib/x.nix".into());
+    assert!(matches!(avalia(&r, &amb), Veredito::Achado { .. }));
+    let mut so_lock = AmbienteMock::default().com_execucao(Verificador::NixFlakeCheck, 1);
+    so_lock.enviados.insert("flake.lock".into());
+    assert!(matches!(avalia(&r, &so_lock), Veredito::Achado { .. }));
+}

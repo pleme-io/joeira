@@ -129,9 +129,19 @@ fn pre_push_judges_the_worktree_for_the_pushed_refs() {
     let r = Repo::novo("pp");
     r.escreve("flake.nix", "{ outputs = _: {}; }\n");
     r.escreve("README.md", "x\n");
-    r.git(&["add", "README.md"]);
+    r.escreve("lib.nix", "{ }\n");
+    r.git(&["add", "README.md", "lib.nix"]);
     r.git(&["commit", "-q", "-m", "seed: readme"]);
-    let triple = "refs/heads/main 1111111111111111111111111111111111111111 refs/heads/main 0000000000000000000000000000000000000000\n";
+    let head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&r.raiz)
+        .output()
+        .expect("git");
+    let head = String::from_utf8_lossy(&head.stdout).into_owned();
+    let triple = format!(
+        "refs/heads/main {} refs/heads/main 0000000000000000000000000000000000000000\n",
+        head.trim()
+    );
     let mut c = Command::new(env!("CARGO_BIN_EXE_joeira"));
     c.args(["pre-push", "origin", "git@example.invalid:x.git"])
         .current_dir(&r.raiz)

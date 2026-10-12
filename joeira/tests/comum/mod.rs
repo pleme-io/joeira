@@ -71,7 +71,30 @@ impl Repo {
     }
 
     pub fn joeira(&self, args: &[&str], sistema: Option<&Path>) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_joeira"))
+        self.joeira_com(args, sistema, "", None)
+    }
+
+    pub fn joeira_com(
+        &self,
+        args: &[&str],
+        sistema: Option<&Path>,
+        entrada: &str,
+        bin_extra: Option<&Path>,
+    ) -> Output {
+        use std::io::Write;
+        let path = match bin_extra {
+            Some(b) => format!(
+                "{}:{}",
+                b.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+            None => std::env::var("PATH").unwrap_or_default(),
+        };
+        let mut filho = Command::new(env!("CARGO_BIN_EXE_joeira"))
+            .env("PATH", path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .args(args)
             .current_dir(&self.dir)
             .env(
@@ -84,8 +107,15 @@ impl Repo {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env_remove("JOEIRA_OFF")
             .env_remove("JOEIRA_SEM_BORDA")
-            .output()
-            .expect("joeira runs")
+            .spawn()
+            .expect("joeira runs");
+        filho
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(entrada.as_bytes())
+            .expect("stdin written");
+        filho.wait_with_output().expect("joeira exits")
     }
 }
 

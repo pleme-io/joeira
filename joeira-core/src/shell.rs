@@ -127,6 +127,56 @@ pub fn autoridade_de(dir: &Path) -> Result<PathBuf, JoeiraError> {
     })
 }
 
+pub fn corre_com_orcamento(
+    cmd: &mut Command,
+    linha: &str,
+    orcamento: std::time::Duration,
+) -> Result<Execucao, JoeiraError> {
+    let mut filho = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                JoeiraError::FerramentaAusente(linha.to_owned())
+            } else {
+                JoeiraError::AmbienteCego(format!("spawning `{linha}`: {e}"))
+            }
+        })?;
+    let mut saida = filho.stdout.take();
+    let leitor = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        if let Some(s) = saida.as_mut() {
+            let _ = s.read_to_end(&mut b);
+        }
+        b
+    });
+    let inicio = std::time::Instant::now();
+    let estado = loop {
+        if let Some(st) = filho
+            .try_wait()
+            .map_err(|e| JoeiraError::AmbienteCego(format!("waiting on `{linha}`: {e}")))?
+        {
+            break st;
+        }
+        if inicio.elapsed() >= orcamento {
+            let _ = filho.kill();
+            let _ = filho.wait();
+            return Err(JoeiraError::OrcamentoEsgotado {
+                linha: linha.to_owned(),
+                segundos: orcamento.as_secs(),
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let bytes = leitor.join().unwrap_or_default();
+    Ok(Execucao {
+        codigo: estado.code().unwrap_or(-1),
+        saida: String::from_utf8_lossy(&bytes).into_owned(),
+    })
+}
+
 /// A repository read through `git` subprocesses.
 pub struct AmbienteShell {
     repo: PathBuf,
@@ -583,6 +633,14 @@ impl AmbienteGit for AmbienteShell {
     }
 
     fn executa(&self, v: Verificador) -> Result<Execucao, JoeiraError> {
+        self.executa_em(v, std::time::Duration::from_secs(u64::from(u32::MAX)))
+    }
+
+    fn executa_em(
+        &self,
+        v: Verificador,
+        orcamento: std::time::Duration,
+    ) -> Result<Execucao, JoeiraError> {
         if let Some(c) = &self.commit {
             return Err(JoeiraError::AmbienteCego(format!(
                 "`{}` runs on a worktree, not on commit {}; not judged per commit",
@@ -590,26 +648,34 @@ impl AmbienteGit for AmbienteShell {
                 c.sha
             )));
         }
-        let out = Command::new(v.programa())
-            .args(v.argumentos())
-            .current_dir(&self.repo)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    JoeiraError::FerramentaAusente(v.programa().to_owned())
-                } else {
-                    JoeiraError::AmbienteCego(format!(
-                        "spawning `{}` in {}: {e}",
-                        v.linha(),
-                        self.repo.display()
-                    ))
-                }
-            })?;
-        Ok(Execucao {
-            codigo: out.status.code().unwrap_or(-1),
-            saida: String::from_utf8_lossy(&out.stdout).into_owned(),
+        let mut cmd = Command::new(v.programa());
+        cmd.args(v.argumentos()).current_dir(&self.repo);
+        corre_com_orcamento(&mut cmd, &v.linha(), orcamento).map_err(|e| match e {
+            JoeiraError::FerramentaAusente(_) => {
+                JoeiraError::FerramentaAusente(v.programa().to_owned())
+            }
+            outro => outro,
         })
+    }
+
+    fn caminhos_enviados(&self) -> Result<Vec<String>, JoeiraError> {
+        let mut todos = std::collections::BTreeSet::new();
+        for e in &self.envios {
+            let saida = if e.sha_remota.bytes().all(|b| b == b'0') {
+                self.git(&[
+                    "log",
+                    "--name-only",
+                    "--format=",
+                    &e.sha_local,
+                    "--not",
+                    "--remotes",
+                ])?
+            } else {
+                self.git(&["diff", "--name-only", &e.sha_remota, &e.sha_local])?
+            };
+            todos.extend(saida.lines().filter(|l| !l.is_empty()).map(str::to_owned));
+        }
+        Ok(todos.into_iter().collect())
     }
 }
 
@@ -857,6 +923,29 @@ mod tests {
             Some(Some("old\n".to_owned()))
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_slow_tool_is_killed_at_its_budget() {
+        let inicio = std::time::Instant::now();
+        let e = corre_com_orcamento(
+            Command::new("sleep").arg("30"),
+            "sleep 30",
+            std::time::Duration::from_secs(1),
+        )
+        .expect_err("killed");
+        assert!(inicio.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(
+            e.to_string(),
+            "`sleep 30` exceeded its 1s budget and was killed"
+        );
+        let ok = corre_com_orcamento(
+            Command::new("echo").arg("hi"),
+            "echo hi",
+            std::time::Duration::from_secs(5),
+        )
+        .expect("runs");
+        assert_eq!((ok.codigo, ok.saida.as_str()), (0, "hi\n"));
     }
 
     #[test]

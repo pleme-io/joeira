@@ -252,6 +252,19 @@ pub fn explain(regras: &[Regra], staged: bool) -> anyhow::Result<()> {
             || "unknown".to_owned(),
             joeira_core::camadas::Origem::rotulo,
         );
+        let orcamento = if r.roda_ferramenta() {
+            format!("; budget {}s", r.orcamento().as_secs())
+        } else {
+            String::new()
+        };
+        let toca = if r.toca().is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; runs only when the push touches {}",
+                r.toca().join(" or ")
+            )
+        };
         let isentos = if r.isencoes().is_empty() {
             String::new()
         } else {
@@ -265,7 +278,7 @@ pub fn explain(regras: &[Regra], staged: bool) -> anyhow::Result<()> {
             r.gatilho().unwrap_or("-")
         );
         let porque = format!(
-            "axes {} x {} => ceiling {}; effective floor {} set by {origem}{isentos}; P1 advisory: acts at most avisa, exit 0",
+            "axes {} x {} => ceiling {}; effective floor {} set by {origem}{isentos}{orcamento}{toca}; P1 advisory: acts at most avisa, exit 0",
             r.reversibilidade().simbolo(),
             r.fp().simbolo(),
             r.tecto().simbolo(),
@@ -543,6 +556,7 @@ mod tests {
             nivel: Nivel::Sistema,
             pisos: Default::default(),
             concessoes: Default::default(),
+            orcamentos: Default::default(),
         };
         a.pisos.insert("estrutural".into(), Severidade::Bloqueia);
         let res = resolve(

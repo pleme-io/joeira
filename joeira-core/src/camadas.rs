@@ -85,7 +85,11 @@ pub struct ArquivoDeCamada {
     pub pisos: BTreeMap<String, Severidade>,
     #[serde(default)]
     pub concessoes: BTreeMap<String, Concessao>,
+    #[serde(default)]
+    pub orcamentos: BTreeMap<String, u64>,
 }
+
+pub const ORCAMENTO_MAXIMO_S: u64 = 600;
 
 pub fn le_arquivo_de_camada(texto: &str) -> Result<ArquivoDeCamada, String> {
     serde_json::from_str(texto).map_err(|e| e.to_string())
@@ -271,6 +275,27 @@ impl Dobra {
                 ),
             );
             return None;
+        }
+        for (nome, segundos) in &a.orcamentos {
+            match self.posicao(nome) {
+                None => self.recusa(
+                    camada,
+                    fonte,
+                    format!("budget for unknown rule `{nome}` refused"),
+                ),
+                Some(_) if *segundos == 0 || *segundos > ORCAMENTO_MAXIMO_S => self.recusa(
+                    camada,
+                    fonte,
+                    format!(
+                        "budget {segundos}s for `{nome}` refused: must be 1..={ORCAMENTO_MAXIMO_S}"
+                    ),
+                ),
+                Some(i) => {
+                    self.regras[i] = self.regras[i]
+                        .clone()
+                        .com_orcamento(std::time::Duration::from_secs(*segundos));
+                }
+            }
         }
         for (nome, piso) in &a.pisos {
             match self.posicao(nome) {
@@ -556,6 +581,7 @@ mod tests {
             nivel,
             pisos: pisos.iter().map(|(n, s)| ((*n).to_owned(), *s)).collect(),
             concessoes: BTreeMap::new(),
+            orcamentos: BTreeMap::new(),
         }
     }
 
@@ -778,6 +804,34 @@ mod tests {
         assert_eq!(piso(&r, "msg-placeholder-subject"), Severidade::Avisa);
         assert_eq!(r.recusas.len(), 2);
         assert!(r.recusas[1].to_string().contains("fleet rules still apply"));
+    }
+
+    #[test]
+    fn budgets_are_set_per_rule_later_layer_wins_and_bad_ones_are_refused() {
+        let mut s = arquivo(Nivel::Sistema, &[]);
+        s.orcamentos.insert("vcs-conflict-markers".into(), 9);
+        s.orcamentos.insert("nope".into(), 9);
+        let mut u = arquivo(Nivel::Usuario, &[]);
+        u.orcamentos.insert("vcs-conflict-markers".into(), 4);
+        u.orcamentos.insert("msg-placeholder-subject".into(), 0);
+        let r = resolve(
+            base(),
+            &Fontes {
+                sistema: Some(("/etc/s".into(), Ok(s))),
+                usuario: Some(("/u".into(), Ok(u))),
+                ..Fontes::default()
+            },
+        );
+        let o = |n: &str| {
+            r.regras
+                .iter()
+                .find(|x| x.nome() == n)
+                .expect("present")
+                .orcamento()
+        };
+        assert_eq!(o("vcs-conflict-markers").as_secs(), 4);
+        assert_eq!(o("msg-placeholder-subject").as_secs(), 3);
+        assert_eq!(r.recusas.len(), 2, "{:?}", r.recusas);
     }
 
     #[test]

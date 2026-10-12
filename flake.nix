@@ -49,11 +49,17 @@
           };
         };
       };
+      budgets = description: mkOption {
+        type = types.attrsOf (types.ints.between 1 600);
+        default = { };
+        inherit description;
+      };
       pisosOf = rules: builtins.mapAttrs (_: s: canonical.${s}) rules;
       systemLayer = { cfg, ... }: {
         environment.etc."joeira/sistema.json".text = builtins.toJSON {
           nivel = "sistema";
           pisos = pisosOf cfg.rules;
+          orcamentos = cfg.budgets;
           concessoes = builtins.mapAttrs (_: g: {
             prefixo = g.pathPrefix;
             verbos = g.verbs;
@@ -74,6 +80,7 @@
         hmNamespace = "blackmatter.components";
         extraSystemOptions = {
           rules = floors "System-level rules and their floors (fleet rules, floors no lower layer relaxes), rendered to /etc/joeira/sistema.json.";
+          budgets = budgets "Per-rule time budgets in seconds for tool-running rows, rendered to sistema.json as orcamentos (default 20 s pre-push, 3 s otherwise). A row over budget is killed and reported not checked.";
           grants = mkOption {
             type = types.attrsOf grant;
             default = { };
@@ -84,6 +91,7 @@
         extraDarwinConfigFn = systemLayer;
         extraHmOptions = {
           rules = floors "User-level rules and their floors, rendered to ~/.config/joeira/usuario.json.";
+          budgets = budgets "Per-rule time budgets in seconds, rendered to usuario.json as orcamentos; they override the system layer's.";
           repoEdge.enable = mkOption {
             type = types.bool;
             default = true;
@@ -94,6 +102,7 @@
           xdg.configFile."joeira/usuario.json".text = builtins.toJSON {
             nivel = "usuario";
             pisos = pisosOf cfg.rules;
+            orcamentos = cfg.budgets;
           };
           home.sessionVariables = lib.mkIf (!cfg.repoEdge.enable) { JOEIRA_SEM_BORDA = "1"; };
         };

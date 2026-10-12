@@ -74,6 +74,9 @@ pub enum JoeiraError {
 
     #[error("not checked: {0} absent")]
     FerramentaAusente(String),
+
+    #[error("`{linha}` exceeded its {segundos}s budget and was killed")]
+    OrcamentoEsgotado { linha: String, segundos: u64 },
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -627,6 +630,16 @@ pub trait AmbienteGit {
     fn agora_unix(&self) -> Result<u64, JoeiraError>;
     fn envios(&self) -> Result<Vec<Envio>, JoeiraError>;
     fn executa(&self, v: Verificador) -> Result<Execucao, JoeiraError>;
+    fn executa_em(
+        &self,
+        v: Verificador,
+        _orcamento: std::time::Duration,
+    ) -> Result<Execucao, JoeiraError> {
+        self.executa(v)
+    }
+    fn caminhos_enviados(&self) -> Result<Vec<String>, JoeiraError> {
+        Ok(Vec::new())
+    }
     fn nao_verificado(&self, _caminho: &str) -> Option<String> {
         None
     }
@@ -654,6 +667,8 @@ pub struct AmbienteMock {
     pub envios: Vec<Envio>,
     pub execucoes: BTreeMap<Verificador, Execucao>,
     pub nao_verificados: BTreeMap<String, String>,
+    pub enviados: std::collections::BTreeSet<String>,
+    pub lentos: std::collections::BTreeSet<Verificador>,
 }
 
 impl AmbienteMock {
@@ -800,6 +815,26 @@ impl AmbienteGit for AmbienteMock {
             .ok_or_else(|| JoeiraError::FerramentaAusente(v.programa().to_owned()))
     }
 
+    fn executa_em(
+        &self,
+        v: Verificador,
+        orcamento: std::time::Duration,
+    ) -> Result<Execucao, JoeiraError> {
+        if self.lentos.contains(&v) {
+            self.olha()?;
+            return Err(JoeiraError::OrcamentoEsgotado {
+                linha: v.linha(),
+                segundos: orcamento.as_secs(),
+            });
+        }
+        self.executa(v)
+    }
+
+    fn caminhos_enviados(&self) -> Result<Vec<String>, JoeiraError> {
+        self.olha()?;
+        Ok(self.enviados.iter().cloned().collect())
+    }
+
     fn nao_verificado(&self, caminho: &str) -> Option<String> {
         self.nao_verificados.get(caminho).cloned()
     }
@@ -837,6 +872,8 @@ pub struct Regra {
     nivel: Nivel,
     gatilho: Option<String>,
     isencoes: Vec<String>,
+    orcamento: std::time::Duration,
+    toca: Vec<String>,
 }
 
 impl Regra {
@@ -867,7 +904,36 @@ impl Regra {
             nivel: Nivel::Sistema,
             gatilho: None,
             isencoes: Vec::new(),
+            orcamento: orcamento_padrao(ponto),
+            toca: Vec::new(),
         }
+    }
+
+    #[must_use]
+    pub const fn com_orcamento(mut self, orcamento: std::time::Duration) -> Self {
+        self.orcamento = orcamento;
+        self
+    }
+
+    #[must_use]
+    pub const fn orcamento(&self) -> std::time::Duration {
+        self.orcamento
+    }
+
+    #[must_use]
+    pub fn com_toca(mut self, toca: Vec<String>) -> Self {
+        self.toca = toca;
+        self
+    }
+
+    #[must_use]
+    pub fn toca(&self) -> &[String] {
+        &self.toca
+    }
+
+    #[must_use]
+    pub fn roda_ferramenta(&self) -> bool {
+        roda_ferramenta(&self.predicado)
     }
 
     #[must_use]
@@ -942,6 +1008,26 @@ impl Regra {
     #[must_use]
     pub const fn severidade(&self) -> Severidade {
         self.piso
+    }
+}
+
+pub const ORCAMENTO_PRE_PUSH: std::time::Duration = std::time::Duration::from_secs(20);
+pub const ORCAMENTO_PADRAO: std::time::Duration = std::time::Duration::from_secs(3);
+
+#[must_use]
+pub const fn orcamento_padrao(ponto: Ponto) -> std::time::Duration {
+    match ponto {
+        Ponto::PrePush => ORCAMENTO_PRE_PUSH,
+        Ponto::PreCommit | Ponto::CommitMsg => ORCAMENTO_PADRAO,
+    }
+}
+
+fn roda_ferramenta(p: &Predicado) -> bool {
+    match p {
+        Predicado::Externo { .. } => true,
+        Predicado::Todos(ps) | Predicado::Algum(ps) => ps.iter().any(roda_ferramenta),
+        Predicado::Nao(q) => roda_ferramenta(q),
+        _ => false,
     }
 }
 
@@ -1034,6 +1120,16 @@ impl<E: AmbienteGit + ?Sized> AmbienteGit for Isento<'_, E> {
     fn executa(&self, v: Verificador) -> Result<Execucao, JoeiraError> {
         self.amb.executa(v)
     }
+    fn executa_em(
+        &self,
+        v: Verificador,
+        orcamento: std::time::Duration,
+    ) -> Result<Execucao, JoeiraError> {
+        self.amb.executa_em(v, orcamento)
+    }
+    fn caminhos_enviados(&self) -> Result<Vec<String>, JoeiraError> {
+        self.amb.caminhos_enviados()
+    }
     fn nao_verificado(&self, caminho: &str) -> Option<String> {
         self.amb.nao_verificado(caminho)
     }
@@ -1075,7 +1171,28 @@ fn avalia_em<E: AmbienteGit + ?Sized>(regra: &Regra, amb: &E) -> Veredito {
             }
         }
     }
-    match sustenta(&regra.predicado, amb) {
+    if !regra.toca.is_empty() {
+        match amb.caminhos_enviados() {
+            Ok(cs) => {
+                if !cs
+                    .iter()
+                    .any(|c| regra.toca.iter().any(|t| c.ends_with(t.as_str())))
+                {
+                    return Veredito::NaoSeAplica {
+                        regra: regra.nome.clone(),
+                        porque: format!("the pushed range touches no {}", regra.toca.join(" or ")),
+                    };
+                }
+            }
+            Err(e) => {
+                return Veredito::Cego {
+                    regra: regra.nome.clone(),
+                    porque: e.to_string(),
+                };
+            }
+        }
+    }
+    match sustenta(&regra.predicado, amb, regra.orcamento) {
         Ok(true) => Veredito::Achado {
             regra: regra.nome.clone(),
             severidade: regra.piso,
@@ -1126,7 +1243,11 @@ fn cauda_de(assunto: &str) -> String {
 }
 
 /// Does this predicate hold?
-fn sustenta<E: AmbienteGit + ?Sized>(p: &Predicado, amb: &E) -> Result<bool, JoeiraError> {
+fn sustenta<E: AmbienteGit + ?Sized>(
+    p: &Predicado,
+    amb: &E,
+    orc: std::time::Duration,
+) -> Result<bool, JoeiraError> {
     match p {
         Predicado::AssuntoNaLista { lista } => {
             let a = assunto_de(&amb.mensagem()?);
@@ -1229,10 +1350,10 @@ fn sustenta<E: AmbienteGit + ?Sized>(p: &Predicado, amb: &E) -> Result<bool, Joe
             let agora = amb.agora_unix()?;
             Ok(agora.saturating_sub(mais_novo) > dias.saturating_mul(86_400))
         }
-        Predicado::Externo { verificador } => Ok(amb.executa(*verificador)?.codigo != 0),
+        Predicado::Externo { verificador } => Ok(amb.executa_em(*verificador, orc)?.codigo != 0),
         Predicado::Todos(ps) => {
             for p in ps {
-                if !sustenta(p, amb)? {
+                if !sustenta(p, amb, orc)? {
                     return Ok(false);
                 }
             }
@@ -1240,13 +1361,13 @@ fn sustenta<E: AmbienteGit + ?Sized>(p: &Predicado, amb: &E) -> Result<bool, Joe
         }
         Predicado::Algum(ps) => {
             for p in ps {
-                if sustenta(p, amb)? {
+                if sustenta(p, amb, orc)? {
                     return Ok(true);
                 }
             }
             Ok(false)
         }
-        Predicado::Nao(p) => Ok(!sustenta(p, amb)?),
+        Predicado::Nao(p) => Ok(!sustenta(p, amb, orc)?),
     }
 }
 

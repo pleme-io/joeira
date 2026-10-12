@@ -269,6 +269,7 @@ fn corpus() -> anyhow::Result<Vec<Regra>> {
             .nivel
             .ok_or_else(|| anyhow::anyhow!("catalog form {:?} omits :nivel", f.nome))?;
         r = r.com_origem(nivel, f.gatilho.clone());
+        r = r.com_toca(t.toca);
         regras.push(r);
     }
     Ok(regras)
@@ -281,6 +282,7 @@ struct Testemunhas {
     bloqueia: AmbienteMock,
     passa: AmbienteMock,
     piso: Option<Severidade>,
+    toca: Vec<String>,
 }
 
 /// Every name the catalog may use. `None` for an unknown name rather than a
@@ -304,6 +306,7 @@ fn testemunhas(f: &joeira_lisp::FormaLida) -> Option<Testemunhas> {
             bloqueia: AmbienteMock::com_mensagem("init"),
             passa: AmbienteMock::com_mensagem("joeira: port the incumbent concerns"),
             piso: None,
+            toca: Vec::new(),
         },
         "msg-ai-attribution-trailer" => Testemunhas {
             predicado: Predicado::MensagemTemTrailer {
@@ -312,6 +315,7 @@ fn testemunhas(f: &joeira_lisp::FormaLida) -> Option<Testemunhas> {
             bloqueia: AmbienteMock::com_mensagem("feat: x\n\nClaude-Session: abc"),
             passa: AmbienteMock::com_mensagem("feat: x\n\nplain body"),
             piso: None,
+            toca: Vec::new(),
         },
         "vcs-conflict-markers" => Testemunhas {
             predicado: Predicado::BlobTemParDeLinhas {
@@ -326,6 +330,7 @@ fn testemunhas(f: &joeira_lisp::FormaLida) -> Option<Testemunhas> {
             // matcher wearing a structural label.
             passa: AmbienteMock::default().com_stage("README.md", "# T\n\n=======\n"),
             piso: Some(Severidade::Bloqueia),
+            toca: Vec::new(),
         },
         "gen-lock-tie" => Testemunhas {
             predicado: Predicado::AmarraDeHash {
@@ -342,6 +347,7 @@ fn testemunhas(f: &joeira_lisp::FormaLida) -> Option<Testemunhas> {
                 .com_stage("Cargo.gen.lock", r#"{"cargo_lock_sha256": "cafebabe"}"#)
                 .com_sha("Cargo.lock", "cafebabe"),
             piso: Some(Severidade::Bloqueia),
+            toca: Vec::new(),
         },
         // The prose matcher, at the ratchet tier its axes derive. Its witnesses
         // are the two shapes that matter: a real credential line, and the
@@ -399,6 +405,7 @@ fn testemunhas(f: &joeira_lisp::FormaLida) -> Option<Testemunhas> {
                 "use cofre_secret::Secret::new;\nlet x = std::secret::y;\n",
             ),
             piso: None,
+            toca: Vec::new(),
         },
         "nix-flake-untracked" => Testemunhas {
             predicado: Predicado::Nao(Box::new(Predicado::Rastreado {
@@ -407,8 +414,15 @@ fn testemunhas(f: &joeira_lisp::FormaLida) -> Option<Testemunhas> {
             bloqueia: AmbienteMock::default().com_arvore("flake.nix"),
             passa: AmbienteMock::default().com_rastreado("flake.nix"),
             piso: None,
+            toca: Vec::new(),
         },
-        "nix-flake-check" => externo(Verificador::NixFlakeCheck, "flake.nix"),
+        "nix-flake-check" => {
+            let mut t = externo(Verificador::NixFlakeCheck, "flake.nix");
+            t.bloqueia.enviados.insert("flake.nix".into());
+            t.passa.enviados.insert("flake.nix".into());
+            t.toca = vec![".nix".into(), "flake.lock".into()];
+            t
+        }
         "nix-flake-lock-age" => {
             let lock = r#"{"nodes":{"nixpkgs":{"locked":{"lastModified":1000000}},"root":{}}}"#;
             Testemunhas {
@@ -423,6 +437,7 @@ fn testemunhas(f: &joeira_lisp::FormaLida) -> Option<Testemunhas> {
                     .com_head("flake.lock", lock)
                     .com_agora(1_000_000 + 86_400),
                 piso: None,
+            toca: Vec::new(),
             }
         }
         "rust-cargo-metadata" => externo(Verificador::CargoMetadata, "Cargo.toml"),
@@ -447,6 +462,7 @@ fn testemunhas(f: &joeira_lisp::FormaLida) -> Option<Testemunhas> {
                 .com_stage(".github/workflows/ci.yml", "on: push\n")
                 .com_execucao(Verificador::Actionlint, 0),
             piso: None,
+            toca: Vec::new(),
         },
         "shell-dockerfile-new" => Testemunhas {
             predicado: Predicado::CaminhoAdicionadoCasa {
@@ -464,6 +480,7 @@ fn testemunhas(f: &joeira_lisp::FormaLida) -> Option<Testemunhas> {
                 .com_stage("svc/Dockerfile", "FROM y\n")
                 .com_adicionado("docs/dockerfiles.md", "x\n"),
             piso: None,
+            toca: Vec::new(),
         },
         "shell-script-beyond-glue" => Testemunhas {
             predicado: Predicado::ScriptAlemDaCola {
@@ -477,6 +494,7 @@ fn testemunhas(f: &joeira_lisp::FormaLida) -> Option<Testemunhas> {
                 .com_head("old.sh", "a\nb\nc\nd\ne\n")
                 .com_stage("old.sh", "a\nb\nc\nd\n"),
             piso: None,
+            toca: Vec::new(),
         },
         _ => return None,
     })
@@ -492,6 +510,7 @@ fn externo(v: Verificador, gatilho: &str) -> Testemunhas {
             .com_arvore(gatilho)
             .com_execucao(v, 0),
         piso: None,
+        toca: Vec::new(),
     }
 }
 
