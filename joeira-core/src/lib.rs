@@ -75,8 +75,11 @@ pub enum JoeiraError {
     #[error("not checked: {0} absent")]
     FerramentaAusente(String),
 
-    #[error("`{linha}` exceeded its {segundos}s budget and was killed")]
-    OrcamentoEsgotado { linha: String, segundos: u64 },
+    #[error("not checked: exceeded budget {ms}ms, `{linha}` was killed")]
+    OrcamentoEsgotado { linha: String, ms: u64 },
+
+    #[error("not checked: exceeded budget {ms}ms, the hook spent it before `{linha}` could run")]
+    PrazoGasto { linha: String, ms: u64 },
 
     #[error("not checked: {0}")]
     NaoVerificavel(String),
@@ -431,6 +434,46 @@ impl Verificador {
             l.push_str(a);
         }
         l
+    }
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum Colocacao {
+    #[default]
+    #[serde(alias = "hook")]
+    Gancho,
+    #[serde(alias = "deferred")]
+    Adiada,
+    #[serde(alias = "off")]
+    Desligada,
+}
+
+impl Colocacao {
+    #[must_use]
+    pub const fn todas() -> &'static [Self] {
+        &[Self::Gancho, Self::Adiada, Self::Desligada]
+    }
+
+    #[must_use]
+    pub const fn simbolo(self) -> &'static str {
+        match self {
+            Self::Gancho => "gancho",
+            Self::Adiada => "adiada",
+            Self::Desligada => "desligada",
+        }
+    }
+
+    #[must_use]
+    pub fn de(s: &str) -> Option<Self> {
+        match s {
+            "gancho" | "hook" => Some(Self::Gancho),
+            "adiada" | "deferred" => Some(Self::Adiada),
+            "desligada" | "off" => Some(Self::Desligada),
+            _ => None,
+        }
     }
 }
 
@@ -865,7 +908,7 @@ impl AmbienteGit for AmbienteMock {
             self.olha()?;
             return Err(JoeiraError::OrcamentoEsgotado {
                 linha: v.linha(),
-                segundos: orcamento.as_secs(),
+                ms: ms(orcamento),
             });
         }
         self.executa(v)
@@ -913,8 +956,9 @@ pub struct Regra {
     nivel: Nivel,
     gatilho: Option<String>,
     isencoes: Vec<String>,
-    orcamento: std::time::Duration,
+    orcamento: Option<std::time::Duration>,
     toca: Vec<String>,
+    colocacao: Colocacao,
 }
 
 impl Regra {
@@ -945,20 +989,35 @@ impl Regra {
             nivel: Nivel::Sistema,
             gatilho: None,
             isencoes: Vec::new(),
-            orcamento: orcamento_padrao(ponto),
+            orcamento: None,
             toca: Vec::new(),
+            colocacao: Colocacao::Gancho,
         }
     }
 
     #[must_use]
+    pub const fn com_colocacao(mut self, colocacao: Colocacao) -> Self {
+        self.colocacao = colocacao;
+        self
+    }
+
+    #[must_use]
+    pub const fn colocacao(&self) -> Colocacao {
+        self.colocacao
+    }
+
+    #[must_use]
     pub const fn com_orcamento(mut self, orcamento: std::time::Duration) -> Self {
-        self.orcamento = orcamento;
+        self.orcamento = Some(orcamento);
         self
     }
 
     #[must_use]
     pub const fn orcamento(&self) -> std::time::Duration {
-        self.orcamento
+        match self.orcamento {
+            Some(o) => o,
+            None => orcamento_padrao(self.ponto, self.colocacao),
+        }
     }
 
     #[must_use]
@@ -1052,14 +1111,62 @@ impl Regra {
     }
 }
 
-pub const ORCAMENTO_PRE_PUSH: std::time::Duration = std::time::Duration::from_secs(20);
-pub const ORCAMENTO_PADRAO: std::time::Duration = std::time::Duration::from_secs(3);
+pub const PRAZO_PRE_PUSH: std::time::Duration = std::time::Duration::from_millis(5000);
+pub const PRAZO_PRE_COMMIT: std::time::Duration = std::time::Duration::from_millis(1500);
+pub const PRAZO_COMMIT_MSG: std::time::Duration = std::time::Duration::from_millis(1000);
 
 #[must_use]
-pub const fn orcamento_padrao(ponto: Ponto) -> std::time::Duration {
+pub const fn prazo_padrao(ponto: Ponto) -> std::time::Duration {
     match ponto {
-        Ponto::PrePush => ORCAMENTO_PRE_PUSH,
-        Ponto::PreCommit | Ponto::CommitMsg => ORCAMENTO_PADRAO,
+        Ponto::PrePush => PRAZO_PRE_PUSH,
+        Ponto::PreCommit => PRAZO_PRE_COMMIT,
+        Ponto::CommitMsg => PRAZO_COMMIT_MSG,
+    }
+}
+
+pub const ORCAMENTO_ADIADO: std::time::Duration = std::time::Duration::from_secs(600);
+
+#[must_use]
+pub const fn orcamento_padrao(ponto: Ponto, colocacao: Colocacao) -> std::time::Duration {
+    match colocacao {
+        Colocacao::Gancho => prazo_padrao(ponto),
+        Colocacao::Adiada | Colocacao::Desligada => ORCAMENTO_ADIADO,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Prazo {
+    pub fim: std::time::Instant,
+    pub total: std::time::Duration,
+}
+
+impl Prazo {
+    #[must_use]
+    pub fn desde(inicio: std::time::Instant, total: std::time::Duration) -> Self {
+        Self {
+            fim: inicio + total,
+            total,
+        }
+    }
+
+    #[must_use]
+    pub fn resta(&self) -> std::time::Duration {
+        self.fim
+            .saturating_duration_since(std::time::Instant::now())
+    }
+}
+
+#[must_use]
+pub fn ms(d: std::time::Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn primeira_ferramenta(p: &Predicado) -> Option<Verificador> {
+    match p {
+        Predicado::Externo { verificador } => Some(*verificador),
+        Predicado::Todos(ps) | Predicado::Algum(ps) => ps.iter().find_map(primeira_ferramenta),
+        Predicado::Nao(q) => primeira_ferramenta(q),
+        _ => None,
     }
 }
 
@@ -1181,8 +1288,16 @@ impl<E: AmbienteGit + ?Sized> AmbienteGit for Isento<'_, E> {
 
 /// Evaluate one rule against one environment.
 pub fn avalia<E: AmbienteGit + ?Sized>(regra: &Regra, amb: &E) -> Veredito {
+    avalia_ate(regra, amb, None)
+}
+
+pub fn avalia_ate<E: AmbienteGit + ?Sized>(
+    regra: &Regra,
+    amb: &E,
+    prazo: Option<Prazo>,
+) -> Veredito {
     if regra.isencoes.is_empty() {
-        avalia_em(regra, amb)
+        avalia_em(regra, amb, prazo)
     } else {
         avalia_em(
             regra,
@@ -1190,11 +1305,12 @@ pub fn avalia<E: AmbienteGit + ?Sized>(regra: &Regra, amb: &E) -> Veredito {
                 amb,
                 prefixos: &regra.isencoes,
             },
+            prazo,
         )
     }
 }
 
-fn avalia_em<E: AmbienteGit + ?Sized>(regra: &Regra, amb: &E) -> Veredito {
+fn avalia_em<E: AmbienteGit + ?Sized>(regra: &Regra, amb: &E, prazo: Option<Prazo>) -> Veredito {
     if let Some(g) = &regra.gatilho {
         match amb.existe(g) {
             Ok(true) => {}
@@ -1233,13 +1349,43 @@ fn avalia_em<E: AmbienteGit + ?Sized>(regra: &Regra, amb: &E) -> Veredito {
             }
         }
     }
-    match sustenta(&regra.predicado, amb, regra.orcamento) {
+    let orcamento = match prazo {
+        None => regra.orcamento(),
+        Some(p) => {
+            let resta = p.resta();
+            if resta.is_zero() {
+                return Veredito::Cego {
+                    regra: regra.nome.clone(),
+                    porque: JoeiraError::PrazoGasto {
+                        linha: primeira_ferramenta(&regra.predicado)
+                            .map_or_else(|| regra.nome.clone(), Verificador::linha),
+                        ms: ms(p.total),
+                    }
+                    .to_string(),
+                };
+            }
+            regra.orcamento().min(resta)
+        }
+    };
+    match sustenta(&regra.predicado, amb, orcamento) {
         Ok(true) => Veredito::Achado {
             regra: regra.nome.clone(),
             severidade: regra.piso,
             mensagem: regra.mensagem.clone(),
         },
         Ok(false) => Veredito::Limpo,
+        Err(JoeiraError::OrcamentoEsgotado { linha, .. })
+            if prazo.is_some_and(|p| orcamento < regra.orcamento() && orcamento <= p.total) =>
+        {
+            Veredito::Cego {
+                regra: regra.nome.clone(),
+                porque: JoeiraError::OrcamentoEsgotado {
+                    linha,
+                    ms: prazo.map_or(0, |p| ms(p.total)),
+                }
+                .to_string(),
+            }
+        }
         Err(e) => Veredito::Cego {
             regra: regra.nome.clone(),
             porque: e.to_string(),

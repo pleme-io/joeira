@@ -35,6 +35,7 @@ regex = { version = "1" }
 thiserror = { version = "2" }
 clap = { version = "4", features = ["derive"] }
 anyhow = { version = "1" }
+rustix = { version = "1", features = ["process"] }
 
 [workspace.lints]
 

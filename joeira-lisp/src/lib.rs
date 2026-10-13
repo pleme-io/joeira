@@ -10,7 +10,7 @@
 //! `pending-joeira: tatara-domain-border` — the derive lands with `joeira-core`
 //! M1, alongside the `defjoeira-ponto` catalog.
 
-use joeira_core::{ClasseFalsoPositivo, Nivel, Ponto, Reversibilidade};
+use joeira_core::{ClasseFalsoPositivo, Colocacao, Nivel, Ponto, Reversibilidade};
 
 /// The fleet catalog, compiled in.
 ///
@@ -79,6 +79,7 @@ pub const CHAVES: &[&str] = &[
     ":lista",
     ":nivel",
     ":gatilho",
+    ":colocacao",
 ];
 
 /// A read form, before it becomes a `joeira_core::Regra`.
@@ -101,6 +102,7 @@ pub struct FormaLida {
     pub lista: Vec<String>,
     pub nivel: Option<Nivel>,
     pub gatilho: Option<String>,
+    pub colocacao: Colocacao,
 }
 
 /// Resolve a `:ponto` symbol. Closed over `Ponto`, so an unknown mount point is
@@ -179,6 +181,19 @@ fn nivel_de(regra: &str, s: &str) -> Result<Nivel, ErroDeLeitura> {
         })
 }
 
+fn colocacao_de(regra: &str, s: &str) -> Result<Colocacao, ErroDeLeitura> {
+    Colocacao::de(s).ok_or_else(|| ErroDeLeitura::SimboloDesconhecido {
+        regra: regra.to_owned(),
+        chave: ":colocacao".to_owned(),
+        achado: s.to_owned(),
+        conhecidas: Colocacao::todas()
+            .iter()
+            .map(|c| c.simbolo())
+            .collect::<Vec<_>>()
+            .join(", "),
+    })
+}
+
 /// Read one `(defjoeira :nome "x" :ponto pre-commit :mensagem "y" …)` form.
 ///
 /// A deliberately small reader: it tokenises on whitespace outside strings and
@@ -252,6 +267,7 @@ where
     let mut lista = Vec::new();
     let mut nivel = None;
     let mut gatilho = None;
+    let mut colocacao = Colocacao::Gancho;
 
     while let Some(t) = it.next() {
         if t == ")" {
@@ -293,6 +309,7 @@ where
             ":fp" => fp = Some(fp_de(&rotulo, &valor)?),
             ":nivel" => nivel = Some(nivel_de(&rotulo, &valor)?),
             ":gatilho" => gatilho = Some(valor),
+            ":colocacao" => colocacao = colocacao_de(&rotulo, &valor)?,
             outra => {
                 return Err(ErroDeLeitura::ChaveDesconhecida {
                     regra: rotulo,
@@ -325,6 +342,7 @@ where
         lista,
         nivel,
         gatilho,
+        colocacao,
     })
 }
 

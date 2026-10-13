@@ -66,6 +66,16 @@ impl Repo {
         std::fs::write(p, conteudo).expect("write");
     }
 
+    fn folgado(&self) -> PathBuf {
+        let p = self.estado.join("usuario.json");
+        std::fs::write(
+            &p,
+            r#"{"nivel":"usuario","prazos_ms":{"pre-commit":60000,"commit-msg":60000,"pre-push":60000}}"#,
+        )
+        .expect("write");
+        p
+    }
+
     fn joeira(&self, args: &[&str], stdin: Stdio, extra: &[(&str, &str)]) -> Output {
         let mut c = Command::new(env!("CARGO_BIN_EXE_joeira"));
         c.args(args)
@@ -74,6 +84,8 @@ impl Repo {
             .env("PATH", &self.bin_git)
             .env("XDG_STATE_HOME", &self.estado)
             .env("HOME", &self.estado)
+            .env("JOEIRA_SISTEMA", self.estado.join("absent-sistema.json"))
+            .env("JOEIRA_USUARIO", self.folgado())
             .env_remove("JOEIRA_OFF");
         for (k, v) in extra {
             c.env(k, v);
@@ -151,6 +163,8 @@ fn pre_push_judges_the_worktree_for_the_pushed_refs() {
         .env("PATH", &r.bin_git)
         .env("XDG_STATE_HOME", &r.estado)
         .env("HOME", &r.estado)
+        .env("JOEIRA_SISTEMA", r.estado.join("absent-sistema.json"))
+        .env("JOEIRA_USUARIO", r.folgado())
         .env_remove("JOEIRA_OFF");
     let mut filho = c.spawn().expect("spawn");
     std::io::Write::write_all(&mut filho.stdin.take().expect("stdin"), triple.as_bytes())
@@ -159,10 +173,8 @@ fn pre_push_judges_the_worktree_for_the_pushed_refs() {
     let e = erro(&o);
     assert_eq!(o.status.code(), Some(0), "{e}");
     assert!(e.contains("WARN nix-flake-untracked"), "{e}");
-    assert!(
-        e.contains("NOT CHECKED nix-flake-check: not checked: nix absent"),
-        "{e}"
-    );
+    assert!(!e.contains("nix-flake-check"), "{e}");
+    assert!(e.contains(", 4 deferred, 0 off; "), "{e}");
 }
 
 #[test]

@@ -52,6 +52,12 @@ enum Comando {
     CommitMsg { arquivo: std::path::PathBuf },
     /// The pre-push hook; ref-triples arrive on stdin.
     PrePush { remoto: String, url: String },
+    /// Run the rules placed `adiada` at a point, outside any hook budget.
+    /// Exit 1 when one of them finds something.
+    Deferred {
+        #[arg(default_value = "pre-push")]
+        ponto: String,
+    },
     /// Explain every rule against the staged index, with provenance.
     Explain {
         #[arg(long)]
@@ -83,6 +89,7 @@ enum Comando {
 }
 
 fn main() -> anyhow::Result<()> {
+    gancho::marca_inicio();
     match Cli::parse().comando {
         Comando::Eval => cmd_eval(),
         Comando::Prova { all } => cmd_prova(all),
@@ -95,6 +102,15 @@ fn main() -> anyhow::Result<()> {
         Comando::CommitMsg { arquivo } => gancho_com_corpus(|r| gancho::commit_msg(r, &arquivo)),
         Comando::PrePush { remoto, url } => {
             gancho_com_corpus(|r| gancho::pre_push(r, &remoto, &url))
+        }
+        Comando::Deferred { ponto } => {
+            let p = Ponto::todos()
+                .iter()
+                .copied()
+                .find(|p| p.arquivo() == ponto)
+                .ok_or_else(|| anyhow::anyhow!("unknown point `{ponto}`"))?;
+            let b = gancho::adiadas(&corpus()?, p)?;
+            std::process::exit(i32::from(b.achados > 0))
         }
         Comando::Explain { staged } => gancho::explain(&corpus()?, staged),
         Comando::Ci { range } => match corpus() {
@@ -269,7 +285,7 @@ fn corpus() -> anyhow::Result<Vec<Regra>> {
             .nivel
             .ok_or_else(|| anyhow::anyhow!("catalog form {:?} omits :nivel", f.nome))?;
         r = r.com_origem(nivel, f.gatilho.clone());
-        r = r.com_toca(t.toca);
+        r = r.com_toca(t.toca).com_colocacao(f.colocacao);
         regras.push(r);
     }
     Ok(regras)

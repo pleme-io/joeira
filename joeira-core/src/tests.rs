@@ -809,17 +809,36 @@ fn regra_externa_lenta() -> Regra {
 #[test]
 fn a_tool_over_its_budget_is_blind_never_clean_never_found() {
     let r = regra_externa_lenta();
-    assert_eq!(r.orcamento().as_secs(), 20);
-    assert_eq!(regra_assunto_placeholder().orcamento().as_secs(), 3);
+    assert_eq!(r.orcamento(), PRAZO_PRE_PUSH);
+    assert_eq!(
+        r.clone().com_colocacao(Colocacao::Adiada).orcamento(),
+        ORCAMENTO_ADIADO
+    );
+    assert_eq!(regra_assunto_placeholder().orcamento(), PRAZO_COMMIT_MSG);
     let mut amb = AmbienteMock::default().com_execucao(Verificador::NixFlakeCheck, 1);
     amb.lentos.insert(Verificador::NixFlakeCheck);
     match avalia(&r, &amb) {
         Veredito::Cego { porque, .. } => {
-            assert!(porque.contains("exceeded its 20s budget"), "{porque}");
+            assert!(porque.contains("exceeded budget 5000ms"), "{porque}");
         }
         outro => panic!("{outro:?}"),
     }
     assert!(!avalia(&r, &amb).gateia());
+    let gasto = Prazo::desde(
+        std::time::Instant::now() - std::time::Duration::from_secs(9),
+        std::time::Duration::from_secs(5),
+    );
+    match avalia_ate(
+        &r,
+        &AmbienteMock::default().com_execucao(Verificador::NixFlakeCheck, 1),
+        Some(gasto),
+    ) {
+        Veredito::Cego { porque, .. } => assert_eq!(
+            porque,
+            "not checked: exceeded budget 5000ms, the hook spent it before `nix flake check --no-build` could run"
+        ),
+        outro => panic!("{outro:?}"),
+    }
 }
 
 #[test]

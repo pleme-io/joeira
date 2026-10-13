@@ -54,12 +54,24 @@
         default = { };
         inherit description;
       };
+      placements = description: mkOption {
+        type = types.attrsOf (types.enum [ "gancho" "adiada" "desligada" "hook" "deferred" "off" ]);
+        default = { };
+        inherit description;
+      };
+      hookBudgets = description: mkOption {
+        type = types.attrsOf (types.ints.between 100 600000);
+        default = { };
+        inherit description;
+      };
       pisosOf = rules: builtins.mapAttrs (_: s: canonical.${s}) rules;
       systemLayer = { cfg, ... }: {
         environment.etc."joeira/sistema.json".text = builtins.toJSON {
           nivel = "sistema";
           pisos = pisosOf cfg.rules;
           orcamentos = cfg.budgets;
+          colocacoes = cfg.placements;
+          prazos_ms = cfg.hookBudgets;
           concessoes = builtins.mapAttrs (_: g: {
             prefixo = g.pathPrefix;
             verbos = g.verbs;
@@ -80,7 +92,9 @@
         hmNamespace = "blackmatter.components";
         extraSystemOptions = {
           rules = floors "System-level rules and their floors (fleet rules, floors no lower layer relaxes), rendered to /etc/joeira/sistema.json.";
-          budgets = budgets "Per-rule time budgets in seconds for tool-running rows, rendered to sistema.json as orcamentos (default 20 s pre-push, 3 s otherwise). A row over budget is killed and reported not checked.";
+          budgets = budgets "Per-rule time budgets in seconds, rendered to sistema.json as orcamentos. A rule in the hook is also capped by its point's hook budget; a deferred rule defaults to 600 s. A row over budget has its process group killed and is reported not checked.";
+          placements = placements "Per-rule placement, rendered to sistema.json as colocacoes: gancho runs in the hook, adiada only under `joeira deferred <point>`, desligada nowhere.";
+          hookBudgets = hookBudgets "Total wall-clock budget per hook point in milliseconds (pre-commit, commit-msg, pre-push), rendered to sistema.json as prazos_ms. Defaults 1500, 1000, 5000.";
           grants = mkOption {
             type = types.attrsOf grant;
             default = { };
@@ -92,6 +106,8 @@
         extraHmOptions = {
           rules = floors "User-level rules and their floors, rendered to ~/.config/joeira/usuario.json.";
           budgets = budgets "Per-rule time budgets in seconds, rendered to usuario.json as orcamentos; they override the system layer's.";
+          placements = placements "Per-rule placement, rendered to usuario.json as colocacoes; overrides the system layer's.";
+          hookBudgets = hookBudgets "Hook budgets per point in milliseconds, rendered to usuario.json as prazos_ms; overrides the system layer's.";
           repoEdge.enable = mkOption {
             type = types.bool;
             default = true;
@@ -103,6 +119,8 @@
             nivel = "usuario";
             pisos = pisosOf cfg.rules;
             orcamentos = cfg.budgets;
+            colocacoes = cfg.placements;
+            prazos_ms = cfg.hookBudgets;
           };
           home.sessionVariables = lib.mkIf (!cfg.repoEdge.enable) { JOEIRA_SEM_BORDA = "1"; };
         };

@@ -7,8 +7,8 @@ use joeira_core::camadas::{
 use joeira_core::journal::{Diario, Registro, TagVeredito};
 use joeira_core::shell::{AmbienteShell, autoridade_de, raiz_de};
 use joeira_core::{
-    AmbienteGit, Nivel, Ponto, Regra, Severidade, Veredito, Verificador, avalia, le_envios,
-    necessidades,
+    AmbienteGit, Colocacao, Nivel, Ponto, Prazo, Regra, Severidade, Veredito, Verificador, avalia,
+    avalia_ate, le_envios, necessidades,
 };
 
 pub const CHAVE_DESLIGA: &str = "JOEIRA_OFF";
@@ -53,7 +53,13 @@ pub fn relata_recusas(onde: &str, r: &Resolucao) {
     }
 }
 
-fn julga_em_camadas(ponto: Ponto, regras: &[Regra], amb: AmbienteShell, repo: &Path) {
+fn julga_em_camadas(
+    ponto: Ponto,
+    regras: &[Regra],
+    amb: AmbienteShell,
+    repo: &Path,
+    inicio: std::time::Instant,
+) {
     let res = em_camadas(regras, repo);
     relata_recusas(ponto.arquivo(), &res);
     let ativas: Vec<Regra> = res
@@ -62,8 +68,42 @@ fn julga_em_camadas(ponto: Ponto, regras: &[Regra], amb: AmbienteShell, repo: &P
         .filter(|r| r.ponto() == ponto)
         .cloned()
         .collect();
-    let amb = amb.com_necessidades(necessidades(&ativas));
-    julga(ponto, &ativas, &amb, repo, Diario::padrao().as_ref());
+    let no_gancho: Vec<Regra> = ativas
+        .iter()
+        .filter(|r| r.colocacao() == Colocacao::Gancho)
+        .cloned()
+        .collect();
+    let amb = amb.com_necessidades(necessidades(&no_gancho));
+    julga(
+        ponto,
+        &ativas,
+        &amb,
+        repo,
+        Diario::padrao().as_ref(),
+        &Modo::Gancho(Prazo::desde(inicio, res.prazo(ponto))),
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Modo {
+    Gancho(Prazo),
+    Adiadas,
+}
+
+impl Modo {
+    const fn colocacao(&self) -> Colocacao {
+        match self {
+            Self::Gancho(_) => Colocacao::Gancho,
+            Self::Adiadas => Colocacao::Adiada,
+        }
+    }
+
+    const fn prazo(&self) -> Option<Prazo> {
+        match self {
+            Self::Gancho(p) => Some(*p),
+            Self::Adiadas => None,
+        }
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -73,6 +113,18 @@ pub struct Balanco {
     pub cegos: usize,
     pub fora: usize,
     pub arquivos_nao_verificados: usize,
+    pub adiadas: usize,
+    pub desligadas: usize,
+}
+
+static INICIO: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+pub fn marca_inicio() {
+    let _ = INICIO.set(std::time::Instant::now());
+}
+
+fn inicio() -> std::time::Instant {
+    *INICIO.get_or_init(std::time::Instant::now)
 }
 
 pub fn desligado() -> bool {
@@ -126,11 +178,19 @@ pub fn julga<E: AmbienteGit + ?Sized>(
     amb: &E,
     repo: &Path,
     diario: Option<&Diario>,
+    modo: &Modo,
 ) -> Balanco {
     let mut b = Balanco::default();
     for r in regras.iter().filter(|r| r.ponto() == ponto) {
+        if r.colocacao() != modo.colocacao() {
+            match r.colocacao() {
+                Colocacao::Desligada => b.desligadas += 1,
+                Colocacao::Adiada | Colocacao::Gancho => b.adiadas += 1,
+            }
+            continue;
+        }
         b.regras += 1;
-        let v = avalia(r, amb);
+        let v = avalia_ate(r, amb, modo.prazo());
         match &v {
             Veredito::Achado {
                 regra, mensagem, ..
@@ -169,27 +229,39 @@ pub fn julga<E: AmbienteGit + ?Sized>(
             ponto.arquivo()
         );
     }
+    let tempo = match modo {
+        Modo::Gancho(p) => format!(
+            "{}ms of a {}ms budget",
+            joeira_core::ms(p.total.saturating_sub(p.resta())),
+            joeira_core::ms(p.total)
+        ),
+        Modo::Adiadas => "deferred run".to_owned(),
+    };
     eprintln!(
-        "joeira {}: {} rules, {} findings, {} not checked, {} not applicable — advisory (P1), exit 0",
+        "joeira {}: {} rules, {} findings, {} not checked, {} not applicable, {} deferred, {} off; {tempo} — advisory (P1), exit 0",
         ponto.arquivo(),
         b.regras,
         b.achados,
         b.cegos,
-        b.fora
+        b.fora,
+        b.adiadas,
+        b.desligadas
     );
     b
 }
 
 pub fn pre_commit(regras: &[Regra]) {
+    let inicio = inicio();
     protegido(Ponto::PreCommit, || {
         let repo = raiz()?;
         let amb = AmbienteShell::novo(&repo);
-        julga_em_camadas(Ponto::PreCommit, regras, amb, &repo);
+        julga_em_camadas(Ponto::PreCommit, regras, amb, &repo, inicio);
         Ok(())
     });
 }
 
 pub fn commit_msg(regras: &[Regra], arquivo: &Path) {
+    let inicio = inicio();
     protegido(Ponto::CommitMsg, || {
         let bruta = std::fs::read(arquivo)
             .map_err(|e| anyhow::anyhow!("cannot read message file {}: {e}", arquivo.display()))?;
@@ -202,17 +274,28 @@ pub fn commit_msg(regras: &[Regra], arquivo: &Path) {
         }
         let repo = raiz()?;
         let amb = AmbienteShell::novo(&repo).com_mensagem(&msg);
-        julga_em_camadas(Ponto::CommitMsg, regras, amb, &repo);
+        julga_em_camadas(Ponto::CommitMsg, regras, amb, &repo, inicio);
         Ok(())
     });
 }
 
-pub fn pre_push(regras: &[Regra], remoto: &str, url: &str) {
-    protegido(Ponto::PrePush, || {
-        let mut entrada = String::new();
-        std::io::stdin()
+fn le_entrada() -> anyhow::Result<String> {
+    use std::io::IsTerminal;
+    let mut entrada = String::new();
+    let stdin = std::io::stdin();
+    if !stdin.is_terminal() {
+        stdin
+            .lock()
             .read_to_string(&mut entrada)
             .map_err(|e| anyhow::anyhow!("cannot read pre-push stdin: {e}"))?;
+    }
+    Ok(entrada)
+}
+
+pub fn pre_push(regras: &[Regra], remoto: &str, url: &str) {
+    let inicio = inicio();
+    protegido(Ponto::PrePush, || {
+        let entrada = le_entrada()?;
         let envios = le_envios(&entrada)?;
         let vivos: Vec<_> = envios.into_iter().filter(|e| !e.eh_remocao()).collect();
         if vivos.is_empty() {
@@ -223,9 +306,46 @@ pub fn pre_push(regras: &[Regra], remoto: &str, url: &str) {
         }
         let repo = raiz()?;
         let amb = AmbienteShell::novo(&repo).com_envios(vivos);
-        julga_em_camadas(Ponto::PrePush, regras, amb, &repo);
+        julga_em_camadas(Ponto::PrePush, regras, amb, &repo, inicio);
         Ok(())
     });
+}
+
+pub fn adiadas(regras: &[Regra], ponto: Ponto) -> anyhow::Result<Balanco> {
+    let repo = raiz()?;
+    let entrada = if ponto == Ponto::PrePush {
+        le_entrada()?
+    } else {
+        String::new()
+    };
+    let vivos: Vec<_> = le_envios(&entrada)?
+        .into_iter()
+        .filter(|e| !e.eh_remocao())
+        .collect();
+    let res = em_camadas(regras, &repo);
+    relata_recusas("deferred", &res);
+    let sem_faixa = vivos.is_empty();
+    let ativas: Vec<Regra> = res
+        .regras
+        .iter()
+        .filter(|r| r.ponto() == ponto)
+        .map(|r| {
+            if sem_faixa {
+                r.clone().com_toca(Vec::new())
+            } else {
+                r.clone()
+            }
+        })
+        .collect();
+    let adiadas: Vec<Regra> = ativas
+        .iter()
+        .filter(|r| r.colocacao() == Colocacao::Adiada)
+        .cloned()
+        .collect();
+    let amb = AmbienteShell::novo(&repo)
+        .com_envios(vivos)
+        .com_necessidades(necessidades(&adiadas));
+    Ok(julga(ponto, &ativas, &amb, &repo, None, &Modo::Adiadas))
 }
 
 pub fn explain(regras: &[Regra], staged: bool) -> anyhow::Result<()> {
@@ -253,9 +373,23 @@ pub fn explain(regras: &[Regra], staged: bool) -> anyhow::Result<()> {
             joeira_core::camadas::Origem::rotulo,
         );
         let orcamento = if r.roda_ferramenta() {
-            format!("; budget {}s", r.orcamento().as_secs())
+            format!(
+                "; budget {}ms of the {}ms {} budget",
+                joeira_core::ms(r.orcamento().min(res.prazo(r.ponto()))),
+                joeira_core::ms(res.prazo(r.ponto())),
+                r.ponto().arquivo()
+            )
         } else {
             String::new()
+        };
+        let orcamento = match r.colocacao() {
+            Colocacao::Gancho => orcamento,
+            Colocacao::Adiada => format!(
+                "; placement adiada: not run in the hook, run by `joeira deferred {}` with a {}ms budget",
+                r.ponto().arquivo(),
+                joeira_core::ms(r.orcamento())
+            ),
+            Colocacao::Desligada => "; placement desligada: configured off".to_owned(),
         };
         let toca = if r.toca().is_empty() {
             String::new()
@@ -284,6 +418,12 @@ pub fn explain(regras: &[Regra], staged: bool) -> anyhow::Result<()> {
             r.tecto().simbolo(),
             r.severidade().simbolo()
         );
+        if r.colocacao() != Colocacao::Gancho {
+            println!(
+                "  -      {cabeca}\n         not evaluated: placed out of the hook\n         {porque}"
+            );
+            continue;
+        }
         if r.ponto() != Ponto::PreCommit {
             println!(
                 "  -      {cabeca}\n         not evaluated: mounts at {}\n         {porque}",
@@ -474,6 +614,13 @@ mod tests {
     use super::*;
     use joeira_core::{AmbienteMock, ClasseFalsoPositivo, Predicado, Reversibilidade};
 
+    fn no_gancho() -> Modo {
+        Modo::Gancho(Prazo::desde(
+            std::time::Instant::now(),
+            std::time::Duration::from_secs(5),
+        ))
+    }
+
     #[test]
     fn the_message_file_drops_comments_and_the_scissors_tail() {
         let m = le_mensagem(
@@ -515,6 +662,7 @@ mod tests {
             &amb,
             Path::new("/x"),
             None,
+            &no_gancho(),
         );
         assert_eq!(
             b,
@@ -523,10 +671,19 @@ mod tests {
                 achados: 1,
                 cegos: 0,
                 fora: 0,
-                arquivos_nao_verificados: 0
+                arquivos_nao_verificados: 0,
+                adiadas: 0,
+                desligadas: 0
             }
         );
-        let b = julga(Ponto::PreCommit, &[r], &amb, Path::new("/x"), None);
+        let b = julga(
+            Ponto::PreCommit,
+            &[r],
+            &amb,
+            Path::new("/x"),
+            None,
+            &no_gancho(),
+        );
         assert_eq!(b.regras, 0);
     }
 
@@ -557,6 +714,8 @@ mod tests {
             pisos: Default::default(),
             concessoes: Default::default(),
             orcamentos: Default::default(),
+            colocacoes: Default::default(),
+            prazos_ms: Default::default(),
         };
         a.pisos.insert("estrutural".into(), Severidade::Bloqueia);
         let res = resolve(
@@ -580,6 +739,7 @@ mod tests {
             &amb,
             Path::new("/x"),
             None,
+            &no_gancho(),
         );
         assert_eq!(b.cegos, 1);
         assert_eq!(b.achados, 0);
@@ -593,6 +753,7 @@ mod tests {
             &AmbienteMock::default(),
             Path::new("/x"),
             None,
+            &no_gancho(),
         );
         assert_eq!(b.fora, 1);
     }

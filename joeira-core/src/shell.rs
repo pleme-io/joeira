@@ -127,15 +127,45 @@ pub fn autoridade_de(dir: &Path) -> Result<PathBuf, JoeiraError> {
     })
 }
 
+fn mata_grupo(pid: u32) {
+    if let Some(p) = i32::try_from(pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    {
+        let _ = rustix::process::kill_process_group(p, rustix::process::Signal::KILL);
+    }
+}
+
+fn le_tudo(
+    fonte: Option<impl Read + Send + 'static>,
+    tx: std::sync::mpsc::Sender<(bool, Vec<u8>)>,
+    erro: bool,
+) {
+    std::thread::spawn(move || {
+        let mut b = Vec::new();
+        if let Some(mut s) = fonte {
+            let _ = s.read_to_end(&mut b);
+        }
+        let _ = tx.send((erro, b));
+    });
+}
+
 pub fn corre_com_orcamento(
     cmd: &mut Command,
     linha: &str,
     orcamento: std::time::Duration,
 ) -> Result<Execucao, JoeiraError> {
+    use std::os::unix::process::CommandExt;
+    let inicio = std::time::Instant::now();
+    let esgotado = || JoeiraError::OrcamentoEsgotado {
+        linha: linha.to_owned(),
+        ms: crate::ms(orcamento),
+    };
     let mut filho = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -144,46 +174,48 @@ pub fn corre_com_orcamento(
                 JoeiraError::AmbienteCego(format!("spawning `{linha}`: {e}"))
             }
         })?;
-    let mut saida = filho.stdout.take();
-    let leitor = std::thread::spawn(move || {
-        let mut b = Vec::new();
-        if let Some(s) = saida.as_mut() {
-            let _ = s.read_to_end(&mut b);
-        }
-        b
-    });
-    let mut erro = filho.stderr.take();
-    let leitor_erro = std::thread::spawn(move || {
-        let mut b = Vec::new();
-        if let Some(s) = erro.as_mut() {
-            let _ = s.read_to_end(&mut b);
-        }
-        b
-    });
-    let inicio = std::time::Instant::now();
+    let pid = filho.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    le_tudo(filho.stdout.take(), tx.clone(), false);
+    le_tudo(filho.stderr.take(), tx, true);
     let estado = loop {
-        if let Some(st) = filho
-            .try_wait()
-            .map_err(|e| JoeiraError::AmbienteCego(format!("waiting on `{linha}`: {e}")))?
-        {
-            break st;
+        match filho.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) => {}
+            Err(e) => {
+                mata_grupo(pid);
+                let _ = filho.kill();
+                let _ = filho.wait();
+                return Err(JoeiraError::AmbienteCego(format!(
+                    "waiting on `{linha}`: {e}"
+                )));
+            }
         }
         if inicio.elapsed() >= orcamento {
+            mata_grupo(pid);
             let _ = filho.kill();
             let _ = filho.wait();
-            return Err(JoeiraError::OrcamentoEsgotado {
-                linha: linha.to_owned(),
-                segundos: orcamento.as_secs(),
-            });
+            return Err(esgotado());
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(5));
     };
-    let bytes = leitor.join().unwrap_or_default();
-    let bytes_erro = leitor_erro.join().unwrap_or_default();
+    let mut saida = None;
+    let mut erro = None;
+    while saida.is_none() || erro.is_none() {
+        let resta = orcamento.saturating_sub(inicio.elapsed());
+        match rx.recv_timeout(resta) {
+            Ok((false, b)) => saida = Some(b),
+            Ok((true, b)) => erro = Some(b),
+            Err(_) => {
+                mata_grupo(pid);
+                return Err(esgotado());
+            }
+        }
+    }
     Ok(Execucao {
         codigo: estado.code().unwrap_or(-1),
-        saida: String::from_utf8_lossy(&bytes).into_owned(),
-        erro: String::from_utf8_lossy(&bytes_erro).into_owned(),
+        saida: String::from_utf8_lossy(&saida.unwrap_or_default()).into_owned(),
+        erro: String::from_utf8_lossy(&erro.unwrap_or_default()).into_owned(),
     })
 }
 
@@ -947,7 +979,7 @@ mod tests {
         assert!(inicio.elapsed() < std::time::Duration::from_secs(5));
         assert_eq!(
             e.to_string(),
-            "`sleep 30` exceeded its 1s budget and was killed"
+            "not checked: exceeded budget 1000ms, `sleep 30` was killed"
         );
         let ok = corre_com_orcamento(
             Command::new("echo").arg("hi"),

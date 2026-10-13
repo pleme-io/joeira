@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Nivel, Regra, Severidade};
+use crate::{Colocacao, Nivel, Ponto, Regra, Severidade, prazo_padrao};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Camada {
@@ -87,9 +87,15 @@ pub struct ArquivoDeCamada {
     pub concessoes: BTreeMap<String, Concessao>,
     #[serde(default)]
     pub orcamentos: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub colocacoes: BTreeMap<String, Colocacao>,
+    #[serde(default)]
+    pub prazos_ms: BTreeMap<Ponto, u64>,
 }
 
 pub const ORCAMENTO_MAXIMO_S: u64 = 600;
+pub const PRAZO_MINIMO_MS: u64 = 100;
+pub const PRAZO_MAXIMO_MS: u64 = 600_000;
 
 pub fn le_arquivo_de_camada(texto: &str) -> Result<ArquivoDeCamada, String> {
     serde_json::from_str(texto).map_err(|e| e.to_string())
@@ -192,12 +198,21 @@ pub struct Resolucao {
     pub origens: BTreeMap<String, Origem>,
     pub subtraidas: BTreeMap<String, Origem>,
     pub recusas: Vec<Recusa>,
+    pub prazos: BTreeMap<Ponto, std::time::Duration>,
 }
 
 impl Resolucao {
     #[must_use]
     pub fn origem(&self, regra: &str) -> Option<&Origem> {
         self.origens.get(regra)
+    }
+
+    #[must_use]
+    pub fn prazo(&self, ponto: Ponto) -> std::time::Duration {
+        self.prazos
+            .get(&ponto)
+            .copied()
+            .unwrap_or_else(|| prazo_padrao(ponto))
     }
 }
 
@@ -208,6 +223,7 @@ struct Dobra {
     origens: BTreeMap<String, Origem>,
     subtraidas: BTreeMap<String, Origem>,
     recusas: Vec<Recusa>,
+    prazos: BTreeMap<Ponto, std::time::Duration>,
 }
 
 impl Dobra {
@@ -297,6 +313,33 @@ impl Dobra {
                 }
             }
         }
+        for (ponto, ms) in &a.prazos_ms {
+            if (PRAZO_MINIMO_MS..=PRAZO_MAXIMO_MS).contains(ms) {
+                self.prazos
+                    .insert(*ponto, std::time::Duration::from_millis(*ms));
+            } else {
+                self.recusa(
+                    camada,
+                    fonte,
+                    format!(
+                        "hook budget {ms}ms for {} refused: must be {PRAZO_MINIMO_MS}..={PRAZO_MAXIMO_MS}",
+                        ponto.arquivo()
+                    ),
+                );
+            }
+        }
+        for (nome, colocacao) in &a.colocacoes {
+            match self.posicao(nome) {
+                Some(i) => {
+                    self.regras[i] = self.regras[i].clone().com_colocacao(*colocacao);
+                }
+                None => self.recusa(
+                    camada,
+                    fonte,
+                    format!("placement for unknown rule `{nome}` refused"),
+                ),
+            }
+        }
         for (nome, piso) in &a.pisos {
             match self.posicao(nome) {
                 Some(i) => self.eleva(i, *piso, camada, fonte),
@@ -326,6 +369,10 @@ pub fn resolve(base: Vec<Regra>, fontes: &Fontes) -> Resolucao {
         origens,
         subtraidas: BTreeMap::new(),
         recusas: Vec::new(),
+        prazos: Ponto::todos()
+            .iter()
+            .map(|p| (*p, prazo_padrao(*p)))
+            .collect(),
     };
 
     let sistema = d.camada_de_arquivo(Camada::Sistema, Nivel::Sistema, &fontes.sistema);
@@ -365,6 +412,7 @@ pub fn resolve(base: Vec<Regra>, fontes: &Fontes) -> Resolucao {
         origens: d.origens,
         subtraidas: d.subtraidas,
         recusas: d.recusas,
+        prazos: d.prazos,
     }
 }
 
@@ -582,6 +630,8 @@ mod tests {
             pisos: pisos.iter().map(|(n, s)| ((*n).to_owned(), *s)).collect(),
             concessoes: BTreeMap::new(),
             orcamentos: BTreeMap::new(),
+            colocacoes: BTreeMap::new(),
+            prazos_ms: BTreeMap::new(),
         }
     }
 
@@ -830,7 +880,7 @@ mod tests {
                 .orcamento()
         };
         assert_eq!(o("vcs-conflict-markers").as_secs(), 4);
-        assert_eq!(o("msg-placeholder-subject").as_secs(), 3);
+        assert_eq!(o("msg-placeholder-subject").as_millis(), 1500);
         assert_eq!(r.recusas.len(), 2, "{:?}", r.recusas);
     }
 

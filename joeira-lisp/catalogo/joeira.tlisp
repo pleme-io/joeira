@@ -129,6 +129,7 @@
 
 (defjoeira
   :nome "nix-flake-check"
+  :colocacao adiada
   :ponto pre-push
   :nivel usuario
   :gatilho "flake.nix"
@@ -156,6 +157,7 @@
 
 (defjoeira
   :nome "rust-cargo-fetch-locked"
+  :colocacao adiada
   :ponto pre-push
   :nivel classe-de-repo
   :gatilho "Cargo.lock"
@@ -183,6 +185,7 @@
 
 (defjoeira
   :nome "go-mod-tidy"
+  :colocacao adiada
   :ponto pre-push
   :nivel classe-de-repo
   :gatilho "go.mod"
@@ -192,6 +195,7 @@
 
 (defjoeira
   :nome "go-vet"
+  :colocacao adiada
   :ponto pre-push
   :nivel classe-de-repo
   :gatilho "go.mod"
