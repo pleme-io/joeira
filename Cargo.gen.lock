@@ -5,7 +5,7 @@
     "Cargo.toml": "287aaa42fac90b70742ac7a6e1eb889a8e885a83e95be13a4dcb852ff95ca48a",
     "joeira-core/Cargo.toml": "aba05085ef52f02ca30a592da0fb5b192823332be50eceee1fd44d88e3ef949b",
     "joeira-lisp/Cargo.toml": "afd1990c6edadc33edd7cc943e2e6968f796ed811e2160492b54d19ae6bdbb0b",
-    "joeira-ratchet/Cargo.toml": "4db68adfdf6cd893bba16c4d2e933916b11e95a04e98fbaf7bbbbac96dcb279a",
+    "joeira-ratchet/Cargo.toml": "813b21f9af3fdaa1454c8a055aed13acc888c237d9f927c205c204cea9dd3d98",
     "joeira/Cargo.toml": "55f58a41c02ae2151f0ff8990a2acbd63443afb4084ecfb840953c7086c9547c"
   },
   "target_resolves": {
@@ -1674,7 +1674,13 @@
       "lib_target": {
         "name": "joeira_ratchet",
         "path": "src/lib.rs"
-      }
+      },
+      "binaries": [
+        {
+          "name": "ratchet",
+          "path": "src/main.rs"
+        }
+      ]
     },
     "libc-0.2.190": {
       "edition": "2021",

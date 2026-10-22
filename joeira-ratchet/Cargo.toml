@@ -17,3 +17,7 @@ authors.workspace = true
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "ratchet"
+path = "src/main.rs"

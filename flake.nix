@@ -79,10 +79,21 @@
           }) cfg.grants;
         };
       };
+      release = import "${substrate}/lib/rust-workspace-release-flake.nix" {
+        inherit nixpkgs crate2nix flake-utils;
+      };
+      ratchet = release {
+        toolName = "ratchet";
+        packageName = "joeira-ratchet";
+        src = self;
+        repo = "pleme-io/joeira";
+      };
+      withRatchet = outputs: outputs // {
+        packages = builtins.mapAttrs (system: pkgs: pkgs // { ratchet = ratchet.packages.${system}.default; }) outputs.packages;
+        apps = builtins.mapAttrs (system: apps: apps // { ratchet = ratchet.apps.${system}.default; }) outputs.apps;
+      };
     in
-    (import "${substrate}/lib/rust-workspace-release-flake.nix" {
-      inherit nixpkgs crate2nix flake-utils;
-    }) {
+    withRatchet (release {
       toolName = "joeira";
       packageName = "joeira";
       src = self;
@@ -125,5 +136,5 @@
           home.sessionVariables = lib.mkIf (!cfg.repoEdge.enable) { JOEIRA_SEM_BORDA = "1"; };
         };
       };
-    };
+    });
 }

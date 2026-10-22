@@ -56,6 +56,7 @@
 //! reinvent.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 /// Known debt for one kind of measured thing: key → measurement when recorded.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -163,6 +164,295 @@ impl Ratchet {
     #[must_use]
     pub fn orphans<'a>(&'a self, live: &BTreeSet<String>) -> Vec<&'a str> {
         self.keys().filter(|k| !live.contains(*k)).collect()
+    }
+
+    pub fn rows(&self) -> impl Iterator<Item = (&str, usize)> {
+        self.recorded.iter().map(|(k, &v)| (k.as_str(), v))
+    }
+
+    #[must_use]
+    pub fn shrunk(&self, key: &str, measured: usize) -> Option<Shrink> {
+        match self.recorded.get(key) {
+            Some(&recorded) if measured < recorded => Some(Shrink {
+                recorded,
+                now: measured,
+            }),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn bank<K: AsRef<str>>(
+        &self,
+        measured: impl IntoIterator<Item = (K, usize)>,
+        mode: BankMode,
+    ) -> Ratchet {
+        let recorded = latest(measured)
+            .into_iter()
+            .filter_map(|(key, now)| match self.recorded.get(&key) {
+                Some(&was) => Some((key, was.min(now))),
+                None if mode == BankMode::Record => Some((key, now)),
+                None => None,
+            })
+            .collect();
+        Ratchet { recorded }
+    }
+
+    #[must_use]
+    pub fn render(&self, kind: &str) -> String {
+        self.rows()
+            .map(|(key, size)| format!("{kind}: {key} {size}\n"))
+            .collect()
+    }
+
+    #[must_use]
+    pub fn summarize<K: AsRef<str>>(
+        &self,
+        kind: &str,
+        measured: impl IntoIterator<Item = (K, usize)>,
+    ) -> Summary {
+        let measured = latest(measured);
+        let mut summary = Summary::default();
+        for (key, size) in &measured {
+            let verdict = self.judge(key, *size);
+            if let Some(shrink) = self.shrunk(key, *size) {
+                summary.shrinks.push(Shrunk {
+                    kind: kind.to_owned(),
+                    key: key.clone(),
+                    shrink,
+                });
+            }
+            summary.judged.push(Judged {
+                kind: kind.to_owned(),
+                key: key.clone(),
+                measured: *size,
+                verdict,
+            });
+        }
+        summary.orphans = self
+            .rows()
+            .filter(|(key, _)| !measured.contains_key(*key))
+            .map(|(key, recorded)| Orphan {
+                kind: kind.to_owned(),
+                key: key.to_owned(),
+                recorded,
+            })
+            .collect();
+        summary
+    }
+}
+
+fn latest<K: AsRef<str>>(rows: impl IntoIterator<Item = (K, usize)>) -> BTreeMap<String, usize> {
+    rows.into_iter()
+        .map(|(k, v)| (k.as_ref().to_owned(), v))
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shrink {
+    pub recorded: usize,
+    pub now: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BankMode {
+    #[default]
+    Shrink,
+    Record,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Judged {
+    pub kind: String,
+    pub key: String,
+    pub measured: usize,
+    pub verdict: Verdict,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shrunk {
+    pub kind: String,
+    pub key: String,
+    pub shrink: Shrink,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Orphan {
+    pub kind: String,
+    pub key: String,
+    pub recorded: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Summary {
+    pub judged: Vec<Judged>,
+    pub shrinks: Vec<Shrunk>,
+    pub orphans: Vec<Orphan>,
+}
+
+impl Summary {
+    #[must_use]
+    pub fn is_red(&self) -> bool {
+        self.failures().next().is_some()
+    }
+
+    pub fn failures(&self) -> impl Iterator<Item = &Judged> {
+        self.judged.iter().filter(|j| j.verdict != Verdict::Held)
+    }
+
+    fn count(&self, pick: fn(&Verdict) -> bool) -> usize {
+        self.judged.iter().filter(|j| pick(&j.verdict)).count()
+    }
+
+    fn merge(&mut self, other: Summary) {
+        self.judged.extend(other.judged);
+        self.shrinks.extend(other.shrinks);
+        self.orphans.extend(other.orphans);
+    }
+}
+
+impl fmt::Display for Judged {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Judged {
+            kind,
+            key,
+            measured,
+            verdict,
+        } = self;
+        match verdict {
+            Verdict::Unrecorded => write!(
+                f,
+                "{kind}: {key} measures {measured} and the baseline has no row for it"
+            ),
+            Verdict::Grew { recorded, grew } => write!(
+                f,
+                "{kind}: {key} measures {measured}, past its recorded {recorded} by {grew}"
+            ),
+            Verdict::Held => write!(f, "{kind}: {key} measures {measured} and holds"),
+        }
+    }
+}
+
+impl fmt::Display for Summary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for j in self.failures() {
+            let word = match j.verdict {
+                Verdict::Unrecorded => "unrecorded",
+                _ => "grew",
+            };
+            writeln!(f, "{word}: {j}")?;
+        }
+        for s in &self.shrinks {
+            writeln!(
+                f,
+                "shrunk: {}: {} measures {}, below its recorded {}; `ratchet bank` banks it",
+                s.kind, s.key, s.shrink.now, s.shrink.recorded
+            )?;
+        }
+        for o in &self.orphans {
+            writeln!(
+                f,
+                "orphan: {}: {} recorded {} and no longer measured",
+                o.kind, o.key, o.recorded
+            )?;
+        }
+        writeln!(
+            f,
+            "{}: {} held, {} grew, {} unrecorded, {} shrunk, {} orphans",
+            if self.is_red() { "red" } else { "green" },
+            self.count(|v| *v == Verdict::Held),
+            self.count(|v| matches!(v, Verdict::Grew { .. })),
+            self.count(|v| *v == Verdict::Unrecorded),
+            self.shrinks.len(),
+            self.orphans.len()
+        )
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Baseline {
+    kinds: BTreeMap<String, Ratchet>,
+}
+
+impl Baseline {
+    #[must_use]
+    pub fn parse(text: &str) -> Baseline {
+        let mut b = Baseline::default();
+        for (kind, key, size) in parse_lines(text) {
+            b.insert(kind, key, size);
+        }
+        b
+    }
+
+    pub fn insert(&mut self, kind: impl Into<String>, key: impl Into<String>, size: usize) {
+        self.kinds.entry(kind.into()).or_default().insert(key, size);
+    }
+
+    #[must_use]
+    pub fn kind(&self, kind: &str) -> Option<&Ratchet> {
+        self.kinds.get(kind)
+    }
+
+    pub fn kinds(&self) -> impl Iterator<Item = (&str, &Ratchet)> {
+        self.kinds.iter().map(|(k, r)| (k.as_str(), r))
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.kinds.values().map(Ratchet::len).sum()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[must_use]
+    pub fn judge(&self, kind: &str, key: &str, measured: usize) -> Verdict {
+        self.kinds
+            .get(kind)
+            .map_or(Verdict::Unrecorded, |r| r.judge(key, measured))
+    }
+
+    #[must_use]
+    pub fn summarize(&self, measured: &Baseline) -> Summary {
+        let empty = Ratchet::default();
+        let mut summary = Summary::default();
+        for kind in self.union(measured) {
+            let recorded = self.kinds.get(kind).unwrap_or(&empty);
+            let now = measured.kinds.get(kind).unwrap_or(&empty);
+            summary.merge(recorded.summarize(kind, now.rows()));
+        }
+        summary
+    }
+
+    #[must_use]
+    pub fn bank(&self, measured: &Baseline, mode: BankMode) -> Baseline {
+        let empty = Ratchet::default();
+        let kinds = self
+            .union(measured)
+            .into_iter()
+            .map(|kind| {
+                let recorded = self.kinds.get(kind).unwrap_or(&empty);
+                let now = measured.kinds.get(kind).unwrap_or(&empty);
+                (kind.to_owned(), recorded.bank(now.rows(), mode))
+            })
+            .filter(|(_, r)| !r.is_empty())
+            .collect();
+        Baseline { kinds }
+    }
+
+    #[must_use]
+    pub fn render(&self) -> String {
+        self.kinds().map(|(kind, r)| r.render(kind)).collect()
+    }
+
+    fn union<'a>(&'a self, other: &'a Baseline) -> BTreeSet<&'a str> {
+        self.kinds
+            .keys()
+            .chain(other.kinds.keys())
+            .map(String::as_str)
+            .collect()
     }
 }
 
@@ -317,5 +607,123 @@ mod tests {
             .collect();
         let countable_before = r.len() - live.iter().filter(|k| r.recorded(k).is_some()).count();
         assert_eq!(r.orphans(&live).len(), countable_before);
+    }
+
+    const PUSH: &str = "wf/image-push.yml::push/Build and push";
+    const TENDRIL: &str = "docs/CLAUDE.md::The Tendril Method";
+
+    #[test]
+    fn shrunk_names_only_a_measurement_below_its_row() {
+        let r = baseline();
+        assert_eq!(
+            r.shrunk(PUSH, 12),
+            Some(Shrink {
+                recorded: 60,
+                now: 12
+            })
+        );
+        assert_eq!(r.shrunk(PUSH, 60), None);
+        assert_eq!(r.shrunk(PUSH, 61), None);
+        assert_eq!(r.shrunk("nope", 0), None);
+        assert_eq!(r.judge(PUSH, 12), Verdict::Held);
+    }
+
+    #[test]
+    fn banking_lowers_a_shrunk_row_and_keeps_a_held_one() {
+        let banked = baseline().bank([(PUSH, 12), (TENDRIL, 4139)], BankMode::Shrink);
+        assert_eq!(banked.recorded(PUSH), Some(12));
+        assert_eq!(banked.recorded(TENDRIL), Some(4139));
+    }
+
+    #[test]
+    fn banking_never_raises_a_grown_row() {
+        let banked = baseline().bank([(PUSH, 61), (TENDRIL, 9000)], BankMode::Record);
+        assert_eq!(banked.recorded(PUSH), Some(60));
+        assert_eq!(banked.recorded(TENDRIL), Some(4139));
+        assert_eq!(
+            banked.judge(PUSH, 61),
+            Verdict::Grew {
+                recorded: 60,
+                grew: 1
+            }
+        );
+    }
+
+    #[test]
+    fn banking_drops_an_orphan_row() {
+        let banked = baseline().bank([(TENDRIL, 4000)], BankMode::Shrink);
+        assert_eq!(banked.recorded(PUSH), None);
+        assert_eq!(banked.len(), 1);
+    }
+
+    #[test]
+    fn banking_records_a_new_scope_only_when_asked() {
+        let shrink = baseline().bank([("new", 7), (PUSH, 60)], BankMode::Shrink);
+        assert_eq!(shrink.recorded("new"), None);
+        assert_eq!(shrink.judge("new", 7), Verdict::Unrecorded);
+        let record = baseline().bank([("new", 7), (PUSH, 60)], BankMode::Record);
+        assert_eq!(record.recorded("new"), Some(7));
+        assert_eq!(record.judge("new", 7), Verdict::Held);
+    }
+
+    #[test]
+    fn banking_is_a_fixed_point_once_banked() {
+        let ms = [(PUSH, 12), (TENDRIL, 4000), ("new", 3)];
+        let once = baseline().bank(ms, BankMode::Record);
+        assert_eq!(once.bank(ms, BankMode::Record), once);
+        assert!(
+            !Baseline::parse(&once.render("entry"))
+                .summarize(&Baseline::parse(&once.render("entry")))
+                .is_red()
+        );
+    }
+
+    #[test]
+    fn a_summary_is_red_only_for_growth_or_an_unrecorded_scope() {
+        let r = baseline();
+        let green = r.summarize("entry", [(PUSH, 12)]);
+        assert!(!green.is_red());
+        assert_eq!(green.shrinks.len(), 1);
+        assert_eq!(green.orphans.len(), 1);
+        assert!(r.summarize("entry", [(PUSH, 61)]).is_red());
+        assert!(r.summarize("entry", [("nope", 0)]).is_red());
+        assert!(!r.summarize("entry", Vec::<(&str, usize)>::new()).is_red());
+    }
+
+    #[test]
+    fn a_summary_prints_one_stable_report() {
+        let s = baseline().summarize("entry", [(PUSH, 61), ("nope", 3), (TENDRIL, 4000)]);
+        assert_eq!(
+            s.to_string(),
+            "unrecorded: entry: nope measures 3 and the baseline has no row for it\n\
+             grew: entry: wf/image-push.yml::push/Build and push measures 61, past its recorded 60 by 1\n\
+             shrunk: entry: docs/CLAUDE.md::The Tendril Method measures 4000, below its recorded 4139; `ratchet bank` banks it\n\
+             red: 1 held, 1 grew, 1 unrecorded, 1 shrunk, 0 orphans\n"
+        );
+    }
+
+    #[test]
+    fn a_multi_kind_baseline_judges_banks_and_renders_per_kind() {
+        let b = Baseline::parse("rust: b 5\nnix: a 3\nrust: a 9\n");
+        assert_eq!(b.render(), "nix: a 3\nrust: a 9\nrust: b 5\n");
+        assert_eq!(b.judge("nix", "b", 1), Verdict::Unrecorded);
+        let m = Baseline::parse("rust: a 4\nrust: b 6\nnix: z 1\n");
+        let s = b.summarize(&m);
+        assert!(s.is_red());
+        assert_eq!(s.orphans.len(), 1);
+        assert_eq!(
+            b.bank(&m, BankMode::Shrink).render(),
+            "rust: a 4\nrust: b 5\n"
+        );
+        assert_eq!(
+            b.bank(&m, BankMode::Record).render(),
+            "nix: z 1\nrust: a 4\nrust: b 5\n"
+        );
+    }
+
+    #[test]
+    fn render_parses_back_to_the_same_baseline() {
+        let b = Baseline::parse("entry: docs/CLAUDE.md::The Tendril Method 4139\nx: k:v 0\n");
+        assert_eq!(Baseline::parse(&b.render()), b);
     }
 }

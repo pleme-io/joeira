@@ -14,6 +14,7 @@ decides that.
 | `joeira-core` | the typed border: the closed predicate algebra, the derived severity projection, the mockable `AmbienteGit` seam (index, message, pre-push ref-triples, repo-local tools as typed argv), the evaluator |
 | `joeira-lisp` | the `(defjoeira …)` reader, with `:nivel` (sistema, usuario, classe-de-repo) and `:gatilho` (the marker path a row needs) |
 | `joeira` | `pre-commit` · `commit-msg <file>` · `pre-push <remote> <url>` · `explain --staged` · `status` · `eval` · `prova` · `pontos` · `oraculo` |
+| `joeira-ratchet` | the fleet's one ratchet (theory/JOEIRA.md §6.2), zero deps: `judge`, `shrunk`, `bank` (`BankMode::{Shrink, Record}`), `render`, `Summary`, multi-kind `Baseline`; conformance-tied to blue's `hadome`. Binary `ratchet judge\|bank\|render` (`nix run github:pleme-io/joeira#ratchet`): judge exits 1 only on growth or an unrecorded scope, bank rewrites the baseline down |
 
 `JOEIRA_OFF=1` disarms every entrypoint and says so. A row whose tool is not on
 `PATH` reports `not checked: <tool> absent`; a row whose marker is absent is
