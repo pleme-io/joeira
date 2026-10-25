@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
-  "cargo_lock_sha256": "81e909da82a5539ebbfc4dfa512da5658501825b2161e3bb613a9dd97fdd00f4",
+  "cargo_lock_sha256": "ef83b1d7ea3359353388afadec3778de7d8ff367d1cd4b2f9167a5eed7cbd44e",
   "manifest_sha256": {
-    "Cargo.toml": "3ca51d3b8c518fc0f08cb37dabdb29b96f8fbc82fa628c8ab3b841d3337b7ea0",
+    "Cargo.toml": "324cc0ed14f6b157168ee2957b9ec2b9cd8860414775693940faa01c6b4d3e98",
     "joeira-core/Cargo.toml": "aba05085ef52f02ca30a592da0fb5b192823332be50eceee1fd44d88e3ef949b",
     "joeira-lisp/Cargo.toml": "afd1990c6edadc33edd7cc943e2e6968f796ed811e2160492b54d19ae6bdbb0b",
     "joeira-ratchet/Cargo.toml": "813b21f9af3fdaa1454c8a055aed13acc888c237d9f927c205c204cea9dd3d98",
@@ -349,7 +349,7 @@
         "build_dependencies": [],
         "features": []
       },
-      "joeira-0.1.14": {
+      "joeira-0.1.15": {
         "runtime_dependencies": [
           {
             "name": "anyhow",
@@ -375,7 +375,7 @@
           },
           {
             "name": "joeira_core",
-            "package_key": "joeira-core-0.1.14",
+            "package_key": "joeira-core-0.1.15",
             "kind": "normal",
             "features": [],
             "uses_default_features": true,
@@ -385,7 +385,7 @@
           },
           {
             "name": "joeira_lisp",
-            "package_key": "joeira-lisp-0.1.14",
+            "package_key": "joeira-lisp-0.1.15",
             "kind": "normal",
             "features": [],
             "uses_default_features": true,
@@ -397,7 +397,7 @@
         "build_dependencies": [],
         "features": []
       },
-      "joeira-core-0.1.14": {
+      "joeira-core-0.1.15": {
         "runtime_dependencies": [
           {
             "name": "okiba",
@@ -467,11 +467,11 @@
         "build_dependencies": [],
         "features": []
       },
-      "joeira-lisp-0.1.14": {
+      "joeira-lisp-0.1.15": {
         "runtime_dependencies": [
           {
             "name": "joeira_core",
-            "package_key": "joeira-core-0.1.14",
+            "package_key": "joeira-core-0.1.15",
             "kind": "normal",
             "features": [],
             "uses_default_features": true,
@@ -493,7 +493,7 @@
         "build_dependencies": [],
         "features": []
       },
-      "joeira-ratchet-0.1.14": {
+      "joeira-ratchet-0.1.15": {
         "runtime_dependencies": [],
         "build_dependencies": [],
         "features": []
@@ -1646,7 +1646,7 @@
     "itoa-1.0.18": {
       "edition": "2021"
     },
-    "joeira-0.1.14": {
+    "joeira-0.1.15": {
       "edition": "2024",
       "binaries": [
         {
@@ -1655,21 +1655,21 @@
         }
       ]
     },
-    "joeira-core-0.1.14": {
+    "joeira-core-0.1.15": {
       "edition": "2024",
       "lib_target": {
         "name": "joeira_core",
         "path": "src/lib.rs"
       }
     },
-    "joeira-lisp-0.1.14": {
+    "joeira-lisp-0.1.15": {
       "edition": "2024",
       "lib_target": {
         "name": "joeira_lisp",
         "path": "src/lib.rs"
       }
     },
-    "joeira-ratchet-0.1.14": {
+    "joeira-ratchet-0.1.15": {
       "edition": "2024",
       "lib_target": {
         "name": "joeira_ratchet",
