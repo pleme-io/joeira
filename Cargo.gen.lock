@@ -2,7 +2,7 @@
   "schema_version": 2,
   "cargo_lock_sha256": "ef83b1d7ea3359353388afadec3778de7d8ff367d1cd4b2f9167a5eed7cbd44e",
   "manifest_sha256": {
-    "Cargo.toml": "324cc0ed14f6b157168ee2957b9ec2b9cd8860414775693940faa01c6b4d3e98",
+    "Cargo.toml": "83fa7af9c1d20cf2bd824f066531767a7f9efd917f2d0be730e73c6752e22f18",
     "joeira-core/Cargo.toml": "aba05085ef52f02ca30a592da0fb5b192823332be50eceee1fd44d88e3ef949b",
     "joeira-lisp/Cargo.toml": "afd1990c6edadc33edd7cc943e2e6968f796ed811e2160492b54d19ae6bdbb0b",
     "joeira-ratchet/Cargo.toml": "813b21f9af3fdaa1454c8a055aed13acc888c237d9f927c205c204cea9dd3d98",
