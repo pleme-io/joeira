@@ -116,7 +116,7 @@
   :fp token-exato
   :mensagem "commit message carries an AI-attribution trailer")
 
-;; ── placement rows, theory/JOEIRA.md §6.1 ─────────────────────────────────
+;; ── placement rows ─────────────────────────────────
 
 (defjoeira
   :nome "nix-flake-untracked"

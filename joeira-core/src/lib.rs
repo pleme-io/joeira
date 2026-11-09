@@ -1,8 +1,6 @@
 //! joeira's typed border — the closed predicate algebra, the derived severity
 //! projection, and the mockable git-environment seam.
 //!
-//! Design: `theory/JOEIRA.md`.
-//!
 //! # What is pure here, and what is not
 //!
 //! An earlier revision of this comment claimed the crate "holds no I/O, spawns
